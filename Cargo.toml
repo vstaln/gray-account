@@ -1,0 +1,33 @@
+[package]
+name = "gray-account"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+license = "MIT"
+description = "gray.alignment.id account login plugin for the gray agent harness"
+
+[lib]
+name = "gray_account"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gray-account"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+reqwest = { version = "0.12", default-features = false, features = [
+  "json",
+  "rustls-tls",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = [
+  "macros",
+  "rt-multi-thread",
+  "io-std",
+  "io-util",
+] }
+
+[profile.release]
+strip = true
