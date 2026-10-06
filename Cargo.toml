@@ -1,6 +1,6 @@
 [package]
 name = "gray-account"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.91"
 license = "MIT"
@@ -16,6 +16,8 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+# check/build/release/publish pipeline for `gray account publish`.
+gray-maker = { git = "https://github.com/vstaln/gray-maker", rev = "e17733813330ea00fef9aa6965070631def25f0c" }
 reqwest = { version = "0.12", default-features = false, features = [
   "json",
   "rustls-tls",

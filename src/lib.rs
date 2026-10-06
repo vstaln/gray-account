@@ -6,6 +6,7 @@
 
 pub mod account;
 pub mod manifest;
+pub mod publish;
 
 use serde_json::Value;
 use serde_json::json;
@@ -85,7 +86,10 @@ mod tests {
         assert_eq!(m["protocol"], "1.1");
         assert_eq!(m["version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(m["commands"], json!(["/login", "/whoami", "/logout"]));
-        assert_eq!(m["completion"], json!(["login", "whoami", "logout"]));
+        assert_eq!(
+            m["completion"],
+            json!(["login", "whoami", "logout", "publish"])
+        );
         assert_eq!(m["tools"], json!([]));
     }
 

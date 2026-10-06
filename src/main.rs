@@ -5,7 +5,7 @@
 
 use std::io::Write as _;
 
-use gray_account::{Reply, account, manifest};
+use gray_account::{Reply, account, manifest, publish};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -18,6 +18,8 @@ commands:
   login [code]      exchange an enrollment code and store the registry token
   whoami            show the stored token's identity
   logout            revoke and forget the stored token
+  publish [--remote HOST] [--dir PATH]
+                    release and publish the plugin in --dir (default: cwd)
   help              show this text
 
 with no arguments, gray-account runs the NDJSON sidecar protocol on stdio.";
@@ -42,6 +44,7 @@ async fn main() -> anyhow::Result<()> {
         Some("login") => run(account::login(args.get(1).map(String::as_str), true).await),
         Some("whoami") => run(account::whoami().await),
         Some("logout") => run(account::logout().await),
+        Some("publish") => run(publish::publish_cli(&args[1..]).await),
         Some("-h" | "--help" | "help") => {
             println!("{USAGE}");
             Ok(())
