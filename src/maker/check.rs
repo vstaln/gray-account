@@ -93,8 +93,11 @@ fn handshake(dir: &Path, entry: &str) -> anyhow::Result<Value> {
         .map_err(|e| anyhow::anyhow!("cannot start {entry}: {e}"))?;
     let mut stdin = child.stdin.take().expect("piped");
     let stdout = child.stdout.take().expect("piped");
-    writeln!(stdin, "{}", json!({"id": 1, "method": "plugin/manifest"}))?;
-    stdin.flush()?;
+    // A CLI-mode binary can exit before we write: a broken pipe here is the
+    // same "did not answer" case the EOF below reports — do not lose that
+    // message behind an io error.
+    let _ = writeln!(stdin, "{}", json!({"id": 1, "method": "plugin/manifest"}));
+    let _ = stdin.flush();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let line = BufReader::new(stdout).lines().next();
