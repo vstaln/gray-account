@@ -1,8 +1,12 @@
 # gray-account
 
-Account login for [gray](https://github.com/vstaln/gray): exchanges an
-enrollment code from [gray.alignment.id](https://gray.alignment.id/account)
-for a registry token, then answers `whoami` and `logout`.
+Account login and plugin making for [gray](https://github.com/vstaln/gray):
+exchanges an enrollment code from
+[gray.alignment.id](https://gray.alignment.id/account) for a registry token,
+answers `whoami` and `logout`, and scaffolds/checks/builds/releases/publishes
+gray plugins. The standalone `gray-maker` plugin was merged into this one —
+every `gray-maker <cmd>` is now `gray account <cmd>` (`ship` is gone;
+`publish` runs the whole pipeline).
 
 ## Install
 
@@ -24,13 +28,28 @@ In the gray REPL:
 /logout
 ```
 
+In the REPL, `/maker` is the plugin-making command: `/maker new weather`
+scaffolds inline, and `/maker <check|build|release|publish>` returns a
+prompt asking the agent to run the step in a shell (each takes minutes).
+
 In a shell:
 
 ```sh
 gray account login [code]
 gray account whoami
 gray account logout
+
+gray account new <name> [--dir D] [--description TEXT] [--no-repo]
+gray account check
+gray account build [--remote HOST]
+gray account release
+gray account publish [--remote HOST] [--dir PATH]
 ```
+
+`check`, `build`, `release` and `publish` act on the plugin in the current
+directory (or `--dir`); `new` scaffolds `~/grayplugins/gray-<name>` and its
+GitHub repo. `publish` is the whole pipeline: registry preflight → check →
+adopt an existing release or build+release → submit → confirm.
 
 Mint a login code at <https://gray.alignment.id/account> — sign in with
 GitHub, Google, or Discord and choose "Generate CLI login code" (it expires
