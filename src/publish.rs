@@ -116,6 +116,16 @@ pub async fn publish(args: &PublishArgs) -> anyhow::Result<String> {
         Preflight::Proceed => {}
     }
 
+    // `check` runs even when a release is waiting to be adopted: it performs
+    // the manifest/version handshake AND builds the debug binary that the
+    // submission reads `commands` from.
+    let checked = run({
+        let p = p.clone();
+        move || check::check(&p)
+    })
+    .await?;
+    eprintln!("{checked}");
+
     // A release another machine (or an earlier run) already shipped can be
     // adopted as-is: same tag, same asset, bytes verified by sha256. Only
     // when there is nothing to adopt do we spend minutes on a build.
@@ -128,11 +138,6 @@ pub async fn publish(args: &PublishArgs) -> anyhow::Result<String> {
         None => {
             eprintln!("publish: no {} asset to adopt — building", p.tag());
             for step in [
-                run({
-                    let p = p.clone();
-                    move || check::check(&p)
-                })
-                .await?,
                 run({
                     let p = p.clone();
                     let remote = args.remote.clone();
