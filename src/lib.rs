@@ -1,10 +1,13 @@
 //! gray-account: a protocol-1.1 sidecar and CLI plugin for gray.
 //!
 //! Carries the gray.alignment.id account commands — login, whoami, logout —
-//! that used to live in gray core. The token file format and location are
-//! unchanged, so a login made by an older gray keeps working.
+//! that used to live in gray core, plus the plugin-maker verbs (`new`,
+//! `check`, `build`, `release`) merged in from the standalone maker plugin.
+//! The token file format and location are unchanged, so a login made by an
+//! older gray keeps working.
 
 pub mod account;
+pub mod maker;
 pub mod manifest;
 pub mod publish;
 
@@ -47,6 +50,10 @@ async fn command_run(params: &Value) -> Value {
         .get("name")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    // `/maker` replies with text or an agent prompt, not always `{"text"}`.
+    if name == "/maker" {
+        return maker::slash(params);
+    }
     let text = match name {
         "/login" => {
             // The code is the first non-empty argv entry; whitespace-only
@@ -80,15 +87,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn manifest_declares_the_three_account_commands() {
+    fn manifest_declares_the_account_and_maker_commands() {
         let m = manifest::manifest();
         assert_eq!(m["name"], "account");
         assert_eq!(m["protocol"], "1.1");
         assert_eq!(m["version"], env!("CARGO_PKG_VERSION"));
-        assert_eq!(m["commands"], json!(["/login", "/whoami", "/logout"]));
+        assert_eq!(
+            m["commands"],
+            json!(["/login", "/whoami", "/logout", "/maker"])
+        );
         assert_eq!(
             m["completion"],
-            json!(["login", "whoami", "logout", "publish"])
+            json!([
+                "login", "whoami", "logout", "new", "check", "build", "release", "publish"
+            ])
         );
         assert_eq!(m["tools"], json!([]));
     }

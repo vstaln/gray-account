@@ -2,7 +2,7 @@
 //!
 //! CLI-only — no `/publish` sidecar command, because the build step takes
 //! minutes and a `command/run` call would time out long before it finished.
-//! The heavy lifting is gray-maker's check → build → release → publish
+//! The heavy lifting is the maker modules' check → build → release → publish
 //! pipeline; this module adds the login gate, a registry preflight, and
 //! adoption of a release the tag already ships instead of rebuilding it.
 //!
@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use tokio::task::spawn_blocking;
 
-use gray_maker::project::Project;
-use gray_maker::{build, check, publish as maker_publish, release};
+use crate::maker::project::Project;
+use crate::maker::{build, check, publish as maker_publish, release};
 
 use crate::account::{self, Account};
 
@@ -28,7 +28,7 @@ pub struct PublishArgs {
     pub remote: Option<String>,
 }
 
-/// Same position-based flag rules as gray-maker's dispatch: `--flag value`.
+/// Same position-based flag rules as the maker dispatch: `--flag value`.
 pub fn parse_args(args: &[String], cwd: &Path) -> anyhow::Result<PublishArgs> {
     let flag = |name: &str| -> Option<String> {
         args.iter()
@@ -179,7 +179,7 @@ pub async fn publish(args: &PublishArgs) -> anyhow::Result<String> {
     ))
 }
 
-/// Run one blocking gray-maker step off the async executor.
+/// Run one blocking maker step off the async executor.
 async fn run<F>(step: F) -> anyhow::Result<String>
 where
     F: FnOnce() -> anyhow::Result<String> + Send + 'static,

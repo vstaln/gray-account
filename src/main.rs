@@ -1,25 +1,33 @@
 //! gray-account CLI entry point.
 //!
-//! `manifest`, `login`, `whoami`, `logout`, `help` run as ordinary shell
+//! `manifest`, `login`, `whoami`, `logout`, `help` and the maker verbs
+//! (`new`, `check`, `build`, `release`, `publish`) run as ordinary shell
 //! commands; no arguments starts the NDJSON sidecar protocol over stdio.
 
 use std::io::Write as _;
 
-use gray_account::{Reply, account, manifest, publish};
+use gray_account::{Reply, account, maker, manifest, publish};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-const USAGE: &str = "gray-account — gray.alignment.id account login
+const USAGE: &str = "gray-account — gray.alignment.id account + plugin maker
 
 usage: gray-account <command> [args]
+       (the same commands run as `gray account <command>` in the gray CLI)
 
 commands:
-  manifest          print the plugin manifest (used by gray at install)
   login [code]      exchange an enrollment code and store the registry token
   whoami            show the stored token's identity
   logout            revoke and forget the stored token
+  new <name> [--dir D] [--description TEXT] [--no-repo]
+                    scaffold ~/grayplugins/gray-<name> and its GitHub repo
+  check             build-free sanity checks: one entry point, manifest handshake
+  build [--remote HOST]
+                    static x86_64 musl release build + reproducible tarball
+  release           tag v<version>, upload the tarball, re-download and verify
   publish [--remote HOST] [--dir PATH]
                     release and publish the plugin in --dir (default: cwd)
+  manifest          print the plugin manifest (used by gray at install)
   help              show this text
 
 with no arguments, gray-account runs the NDJSON sidecar protocol on stdio.";
@@ -44,6 +52,10 @@ async fn main() -> anyhow::Result<()> {
         Some("login") => run(account::login(args.get(1).map(String::as_str), true).await),
         Some("whoami") => run(account::whoami().await),
         Some("logout") => run(account::logout().await),
+        Some("new" | "check" | "build" | "release") => {
+            let cwd = std::env::current_dir()?;
+            run(maker::dispatch(&args, &cwd))
+        }
         Some("publish") => run(publish::publish_cli(&args[1..]).await),
         Some("-h" | "--help" | "help") => {
             println!("{USAGE}");

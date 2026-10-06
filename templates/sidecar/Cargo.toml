@@ -1,0 +1,17 @@
+[package]
+name = "__PKG__"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+license = "MIT"
+description = "__DESC__"
+
+[[bin]]
+name = "__PKG__"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"
+
+[profile.release]
+strip = true
