@@ -17,8 +17,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 # check/build/release/publish pipeline for `gray account publish`.
-# TODO: repin to the main branch once gray-maker#1 merges.
-gray-maker = { git = "https://github.com/vstaln/gray-maker", rev = "a4403911ff81c60e30367d791cd5a4de95df8f5c" }
+gray-maker = { git = "https://github.com/vstaln/gray-maker", rev = "e17733813330ea00fef9aa6965070631def25f0c" }
 reqwest = { version = "0.12", default-features = false, features = [
   "json",
   "rustls-tls",
