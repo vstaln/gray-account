@@ -308,6 +308,10 @@ pub struct Account {
     pub provider: Option<String>,
     #[serde(default)]
     pub avatar_url: Option<String>,
+    /// True when the registry lets this account publish to the official
+    /// plugin set; `plugins` then includes those official entries too.
+    #[serde(default)]
+    pub maintainer: bool,
     #[serde(default)]
     pub plugins: Vec<OwnedPlugin>,
 }
@@ -333,8 +337,11 @@ struct TokenExchangeResponse {
 
 // ---- HTTP -----------------------------------------------------------------
 
-fn http_client() -> anyhow::Result<reqwest::Client> {
+/// A named User-Agent: the site refuses some default/absent ones, and a
+/// registry log line should be able to tell gray-account from a browser.
+pub(crate) fn http_client() -> anyhow::Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
+        .user_agent(concat!("gray-account/", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(30))
         .build()?)
 }
@@ -545,6 +552,9 @@ pub async fn whoami() -> anyhow::Result<String> {
     let mut out = format!("{}\n", account.label());
     if let Some(provider) = &account.provider {
         out.push_str(&format!("signed in with {provider}\n"));
+    }
+    if account.maintainer {
+        out.push_str("maintainer: can publish official gray plugins\n");
     }
     if !account.plugins.is_empty() {
         out.push_str("plugins:\n");
