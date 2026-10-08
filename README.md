@@ -1,4 +1,13 @@
-# gray-account
+<p align="center">
+  <img src="assets/gray-logo.svg" alt="gray" width="96">
+</p>
+<h1 align="center">gray-account</h1>
+<p align="center">Sign in to the gray registry and scaffold, check, build and publish gray plugins.</p>
+<p align="center">
+  <a href="https://github.com/vstaln/gray-account/blob/main/LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
+  <img alt="gray plugin" src="https://img.shields.io/badge/gray-plugin-7aa2f7.svg">
+  <img alt="rust" src="https://img.shields.io/badge/built%20with-rust-orange.svg">
+</p>
 
 Account login and plugin making for [gray](https://github.com/vstaln/gray):
 exchanges an enrollment code from
@@ -66,3 +75,7 @@ login keeps working after installing the plugin.
 
 Honest note: nothing in gray currently gates functionality on an account —
 the token only names you on registry calls.
+
+---
+Part of the [gray](https://github.com/vstaln/gray) plugin ecosystem —
+the open-source AI agent harness. <https://gray.alignment.id>
