@@ -4,7 +4,7 @@
 //! (`new`, `check`, `build`, `release`, `publish`) run as ordinary shell
 //! commands; no arguments starts the NDJSON sidecar protocol over stdio.
 
-use std::io::Write as _;
+use std::io::{IsTerminal, Write as _};
 
 use gray_account::{Reply, account, maker, manifest, publish};
 use serde::Deserialize;
@@ -61,9 +61,16 @@ async fn main() -> anyhow::Result<()> {
             println!("{USAGE}");
             Ok(())
         }
-        Some(_) => {
-            eprintln!("{USAGE}");
+        Some(other) => {
+            eprintln!("unknown command '{other}'\n\n{USAGE}");
             std::process::exit(2);
+        }
+        // A TTY stdin can never be the host (piped stdin is the spawn
+        // signal), so bare `gray account` in a terminal means "show me what
+        // this is" — print help instead of waiting on sidecar frames.
+        None if std::io::stdin().is_terminal() => {
+            println!("{USAGE}");
+            Ok(())
         }
         None => sidecar().await,
     }
