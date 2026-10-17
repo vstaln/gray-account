@@ -457,8 +457,8 @@ pub fn logout_message(outcome: LogoutOutcome) -> &'static str {
 /// scripted `gray account login` fails loudly instead of hanging.
 pub fn prompt_for_code() -> Option<String> {
     use std::io::Write as _;
-    print!("code: ");
-    let _ = std::io::stdout().flush();
+    eprint!("code: ");
+    let _ = std::io::stderr().flush();
     let mut line = String::new();
     match std::io::stdin().read_line(&mut line) {
         Ok(0) | Err(_) => None,
@@ -500,7 +500,10 @@ pub async fn login(code: Option<&str>, interactive: bool) -> anyhow::Result<Stri
                 prefix.push_str("\nThen run /login <code>.");
                 return Ok(prefix);
             }
-            out.push_str(&prefix);
+            // Interactive: the walkthrough belongs in front of the prompt —
+            // printing it with the result would show "where to get a code"
+            // only after the code was already entered.
+            eprint!("{prefix}");
             match prompt_for_code() {
                 Some(c) => c,
                 None => anyhow::bail!("no enrollment code given — run `gray account login <code>`"),
