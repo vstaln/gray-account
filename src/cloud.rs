@@ -9,15 +9,248 @@ use serde::Deserialize;
 
 use crate::account;
 
+#[cfg(unix)]
+mod attach {
+    //! `gray cloud` on a tty: attach to the gray REPL running under a pty on
+    //! this account's Maritime VM. The VM can only speak outbound HTTP, so
+    //! both directions ride the registry's relay — keystrokes POST to
+    //! /input and get long-polled by the VM; pty output POSTs from the VM
+    //! get long-polled here on /output. Bytes are verbatim: the remote pty
+    //! owns echo and line editing, so the screen IS gray's own UI.
+
+    use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    use base64::Engine;
+    use serde::Deserialize;
+
+    /// A paste arrives as back-to-back stdin reads; one POST per burst keeps
+    /// input latency at one round trip.
+    const BATCH_WINDOW: Duration = Duration::from_millis(40);
+    /// Server-side long-poll holds ~30s; client timeout stays above it.
+    const POLL_TIMEOUT: Duration = Duration::from_secs(45);
+    /// Local escape: Ctrl-] detaches; the remote session keeps running.
+    const DETACH: u8 = 0x1d;
+
+    const B64: base64::engine::general_purpose::GeneralPurpose =
+        base64::engine::general_purpose::STANDARD;
+
+    #[derive(Deserialize)]
+    struct AttachOut {
+        attach_id: i64,
+        online: bool,
+        out_seq: i64,
+    }
+
+    #[derive(Deserialize)]
+    struct OutputOut {
+        #[serde(default)]
+        seq: i64,
+        #[serde(default)]
+        data: String,
+        #[serde(default)]
+        supplanted: bool,
+        #[serde(default)]
+        reset: bool,
+    }
+
+    enum ToVm {
+        Bytes(Vec<u8>),
+        Resize(u16, u16),
+        Stop,
+    }
+
+    struct RawMode;
+    impl RawMode {
+        fn enable() -> anyhow::Result<Self> {
+            crossterm::terminal::enable_raw_mode()?;
+            Ok(Self)
+        }
+    }
+    impl Drop for RawMode {
+        fn drop(&mut self) {
+            let _ = crossterm::terminal::disable_raw_mode();
+        }
+    }
+
+    fn agent() -> ureq::Agent {
+        ureq::AgentBuilder::new()
+            .timeout_connect(Duration::from_secs(10))
+            .build()
+    }
+
+    fn post(
+        agent: &ureq::Agent,
+        token: &str,
+        path: &str,
+        body: serde_json::Value,
+    ) -> anyhow::Result<ureq::Response> {
+        let url = crate::account::endpoint(path)?;
+        agent
+            .post(&url)
+            .set("authorization", &format!("Bearer {token}"))
+            .send_json(body)
+            .map_err(|e| anyhow::anyhow!("{path}: {e}"))
+    }
+
+    pub fn run(token: &str) -> anyhow::Result<()> {
+        let http = agent();
+        let att: AttachOut =
+            post(&http, token, "agent/tty/attach", serde_json::json!({}))?.into_json()?;
+
+        let mut out = std::io::stdout();
+        if !att.online {
+            writeln!(out, "waking your machine…")?;
+            out.flush()?;
+        }
+
+        let _raw = RawMode::enable()?;
+        let done = std::sync::Arc::new(AtomicBool::new(false));
+        let (tx, rx) = mpsc::channel::<ToVm>();
+
+        {
+            let tx = tx.clone();
+            let done = done.clone();
+            std::thread::spawn(move || {
+                let mut stdin = std::io::stdin();
+                let mut buf = [0u8; 4096];
+                while !done.load(Ordering::Relaxed) {
+                    match stdin.read(&mut buf) {
+                        Ok(0) | Err(_) => {
+                            let _ = tx.send(ToVm::Stop);
+                            break;
+                        }
+                        Ok(n) => {
+                            let bytes = &buf[..n];
+                            if bytes.contains(&DETACH) {
+                                let _ = tx.send(ToVm::Stop);
+                                break;
+                            }
+                            if tx.send(ToVm::Bytes(bytes.to_vec())).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        {
+            let tx = tx.clone();
+            let done = done.clone();
+            std::thread::spawn(move || {
+                let mut last = crossterm::terminal::size().unwrap_or((0, 0));
+                let _ = tx.send(ToVm::Resize(last.0, last.1));
+                while !done.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(250));
+                    let now = crossterm::terminal::size().unwrap_or((0, 0));
+                    if now != last {
+                        last = now;
+                        let _ = tx.send(ToVm::Resize(now.0, now.1));
+                    }
+                }
+            });
+        }
+
+        {
+            let done = done.clone();
+            let tx = tx.clone();
+            let http_out = agent();
+            let token = token.to_string();
+            let attach_id = att.attach_id;
+            std::thread::spawn(move || {
+                let mut after = att.out_seq;
+                let url = crate::account::endpoint("agent/tty/output");
+                while !done.load(Ordering::Relaxed) {
+                    let Ok(base) = &url else { break };
+                    let resp = http_out
+                        .get(&format!("{base}?after={after}&attach={attach_id}"))
+                        .set("authorization", &format!("Bearer {token}"))
+                        .timeout(POLL_TIMEOUT)
+                        .call();
+                    let payload: OutputOut = match resp {
+                        Ok(r) => match r.into_json() {
+                            Ok(p) => p,
+                            Err(_) => continue,
+                        },
+                        Err(_) => {
+                            std::thread::sleep(Duration::from_millis(800));
+                            continue;
+                        }
+                    };
+                    if payload.supplanted {
+                        let _ = tx.send(ToVm::Stop);
+                        break;
+                    }
+                    if payload.reset {
+                        let mut out = std::io::stdout();
+                        let _ = out.write_all(b"\x1b[2J\x1b[H");
+                        let _ = out.flush();
+                    }
+                    if let Ok(bytes) = B64.decode(&payload.data)
+                        && !bytes.is_empty()
+                    {
+                        let mut out = std::io::stdout();
+                        let _ = out.write_all(&bytes);
+                        let _ = out.flush();
+                    }
+                    after = payload.seq;
+                }
+            });
+        }
+
+        let mut last_send = Instant::now() - BATCH_WINDOW;
+        let mut pending: Vec<u8> = Vec::new();
+        loop {
+            match rx.recv_timeout(Duration::from_millis(25)) {
+                Ok(ToVm::Bytes(b)) => pending.extend_from_slice(&b),
+                Ok(ToVm::Resize(c, r)) => {
+                    let _ = post(
+                        &http,
+                        token,
+                        "agent/tty/input",
+                        serde_json::json!({ "resize": { "cols": c, "rows": r } }),
+                    );
+                }
+                Ok(ToVm::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            if !pending.is_empty() && (pending.len() > 1024 || last_send.elapsed() >= BATCH_WINDOW)
+            {
+                let body = std::mem::take(&mut pending);
+                let _ = post(
+                    &http,
+                    token,
+                    "agent/tty/input",
+                    serde_json::json!({ "data": B64.encode(&body) }),
+                );
+                last_send = Instant::now();
+            }
+        }
+
+        done.store(true, Ordering::Relaxed);
+        let _ = post(&http, token, "agent/tty/detach", serde_json::json!({}));
+        drop(_raw);
+        writeln!(out, "\r\n[detached — the remote session keeps running]")?;
+        Ok(())
+    }
+}
+
 const USAGE: &str = "gray cloud — your hosted Gray machine
 
 usage: gray cloud [command] [args]
 
 commands:
+  (no args)        attach to the live remote session — same UI, remote brain
+  attach           same as bare `gray cloud`
   connect [code]   pair this terminal with a one-time code from the account page
   status           provision if needed and print the machine's state
   logout           revoke the stored token and forget the pairing
-  <message>        chat with your machine (first call provisions it)";
+  <message>        one-shot chat with your machine (first call provisions it)
+
+detaching: Ctrl-] leaves the remote session running";
 
 #[derive(Debug, Default, Deserialize)]
 struct StatusOut {
@@ -151,7 +384,19 @@ async fn chat(words: &[String], interactive: bool) -> anyhow::Result<String> {
 /// where anything that is not a known verb is the message.
 pub async fn run(args: &[String], interactive: bool) -> anyhow::Result<String> {
     match args.first().map(String::as_str) {
-        None | Some("status") => {
+        #[cfg(unix)]
+        None | Some("attach")
+            if interactive
+                && std::io::IsTerminal::is_terminal(&std::io::stdout())
+                && std::io::IsTerminal::is_terminal(&std::io::stdin()) =>
+        {
+            let token = require_token(interactive).await?;
+            tokio::task::spawn_blocking(move || attach::run(&token))
+                .await
+                .map_err(|e| anyhow::anyhow!("attach worker: {e}"))??;
+            Ok(String::new())
+        }
+        None | Some("status") | Some("attach") => {
             let client = http_client()?;
             let token = require_token(interactive).await?;
             status_text(&client, &token).await
