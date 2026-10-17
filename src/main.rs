@@ -6,7 +6,7 @@
 
 use std::io::{IsTerminal, Write as _};
 
-use gray_account::{Reply, account, maker, manifest, publish};
+use gray_account::{Reply, account, cloud, maker, manifest, publish};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -19,6 +19,8 @@ commands:
   login [code]      exchange an enrollment code and store the registry token
   whoami            show the stored token's identity
   logout            revoke and forget the stored token
+  cloud [connect [code]|status|logout|<message>]
+                    your hosted Gray machine on gray.alignment.id
   new <name> [--dir D] [--description TEXT] [--no-repo]
                     scaffold ~/grayplugins/gray-<name> and its GitHub repo
   check             build-free sanity checks: one entry point, manifest handshake
@@ -54,6 +56,7 @@ async fn main() -> anyhow::Result<()> {
         Some("login") => run(account::login(args.get(1).map(String::as_str), true).await),
         Some("whoami") => run(account::whoami().await),
         Some("logout") => run(account::logout().await),
+        Some("cloud") => run(cloud::run(&args[1..], std::io::stdin().is_terminal()).await),
         Some("new" | "check" | "build" | "release") => {
             let cwd = std::env::current_dir()?;
             run(maker::dispatch(&args, &cwd))

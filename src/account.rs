@@ -348,7 +348,7 @@ pub(crate) fn http_client() -> anyhow::Result<reqwest::Client> {
 
 /// The registry reports failures as `{"error": "..."}`; surface that message
 /// verbatim instead of a bare status code.
-async fn error_message(resp: reqwest::Response) -> String {
+pub(crate) async fn error_message(resp: reqwest::Response) -> String {
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body)
@@ -478,35 +478,33 @@ pub fn login_instructions() -> String {
 
 // ---- Command entry points -------------------------------------------------
 
-/// `gray account login [CODE]` / `/login [CODE]`.
+/// Exchange a code (or a prompted one) for a token, persist it, and revoke
+/// the token it replaced. Returns the new token plus the account it belongs
+/// to — `cloud connect` needs both, `login` only prints the account.
 ///
-/// Interactive (shell): prints the walkthrough when no code is given and
-/// prompts on stdin. Non-interactive (sidecar): returns the walkthrough
-/// ending with "Then run /login <code>." without reading stdin. Either way
-/// the returned string is everything the caller should print.
-pub async fn login(code: Option<&str>, interactive: bool) -> anyhow::Result<String> {
+/// Interactive: prints the walkthrough and prompts on stdin when `code` is
+/// missing. Non-interactive: `code` must be present.
+pub async fn enroll(code: Option<&str>, interactive: bool) -> anyhow::Result<(String, Account)> {
     // The arg goes through the same sanitizer as the prompt: a code pasted
     // into a shell that leaves bracketed paste on for its children (bash
     // does) arrives still wrapped in `ESC[200~ ... ESC[201~`.
-    let mut out = String::new();
     let code = match code.and_then(normalize_code) {
         Some(c) => c,
         None => {
-            let mut prefix = format!(
-                "Log in to gray.alignment.id from this machine.\n\n{}\n",
-                login_instructions()
+            anyhow::ensure!(
+                interactive,
+                "no enrollment code given — run `gray login <code>`"
             );
-            if !interactive {
-                prefix.push_str("\nThen run /login <code>.");
-                return Ok(prefix);
-            }
             // Interactive: the walkthrough belongs in front of the prompt —
             // printing it with the result would show "where to get a code"
             // only after the code was already entered.
-            eprint!("{prefix}");
+            eprint!(
+                "Log in to gray.alignment.id from this machine.\n\n{}\n",
+                login_instructions()
+            );
             match prompt_for_code() {
                 Some(c) => c,
-                None => anyhow::bail!("no enrollment code given — run `gray account login <code>`"),
+                None => anyhow::bail!("no enrollment code given — run `gray login <code>`"),
             }
         }
     };
@@ -531,7 +529,24 @@ pub async fn login(code: Option<&str>, interactive: bool) -> anyhow::Result<Stri
             "warning: the previous registry token could not be revoked and may still be valid"
         );
     }
-    out.push_str(&format!("logged in as {}\n", account.label()));
+    Ok((token, account))
+}
+
+/// `gray account login [CODE]` / `/login [CODE]`.
+///
+/// Interactive (shell): prints the walkthrough when no code is given and
+/// prompts on stdin. Non-interactive (sidecar): returns the walkthrough
+/// ending with "Then run /login <code>." without reading stdin. Either way
+/// the returned string is everything the caller should print.
+pub async fn login(code: Option<&str>, interactive: bool) -> anyhow::Result<String> {
+    if !interactive && code.and_then(normalize_code).is_none() {
+        return Ok(format!(
+            "Log in to gray.alignment.id from this machine.\n\n{}\n\nThen run /login <code>.",
+            login_instructions()
+        ));
+    }
+    let (_token, account) = enroll(code, interactive).await?;
+    let mut out = format!("logged in as {}\n", account.label());
     if account.plugins.is_empty() {
         out.push_str("no plugins published yet\n");
     } else {
