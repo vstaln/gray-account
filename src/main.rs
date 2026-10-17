@@ -53,13 +53,25 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string(&manifest::manifest())?);
             Ok(())
         }
-        Some("login") => run(account::login(args.get(1).map(String::as_str), true).await),
+        Some("login") => match args.get(1).map(String::as_str) {
+            Some("-h" | "--help") => {
+                println!(
+                    "usage: gray login <enrollment-code>\n\nget a code at https://gray.alignment.id"
+                );
+                Ok(())
+            }
+            code => run(account::login(code, true).await),
+        },
         Some("whoami") => run(account::whoami().await),
         Some("logout") => run(account::logout().await),
         Some("cloud") => run(cloud::run(&args[1..], std::io::stdin().is_terminal()).await),
         Some("new" | "check" | "build" | "release") => {
             let cwd = std::env::current_dir()?;
             run(maker::dispatch(&args, &cwd))
+        }
+        Some("maker") => {
+            let cwd = std::env::current_dir()?;
+            run(maker::dispatch(&args[1..], &cwd))
         }
         Some("publish") => run(publish::publish_cli(&args[1..]).await),
         Some("-h" | "--help" | "help") => {
