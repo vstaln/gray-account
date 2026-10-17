@@ -42,8 +42,13 @@ pub fn render(key: &str, description: &str, dir: &Path) -> anyhow::Result<Vec<Pa
             "invalid plugin name '{key}': use lowercase letters, digits and hyphens, starting with a letter or digit"
         );
     }
-    if dir.exists() && std::fs::read_dir(dir)?.next().is_some() {
-        anyhow::bail!("{} already exists and is not empty", dir.display());
+    if dir.exists() {
+        if !dir.is_dir() {
+            anyhow::bail!("{} exists and is not a directory", dir.display());
+        }
+        if std::fs::read_dir(dir)?.next().is_some() {
+            anyhow::bail!("{} already exists and is not empty", dir.display());
+        }
     }
     let package = format!("gray-{key}");
     let tool = format!("{}_hello", key.replace('-', "_"));

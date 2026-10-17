@@ -4,9 +4,9 @@
 //! (`new`, `check`, `build`, `release`, `publish`) run as ordinary shell
 //! commands; no arguments starts the NDJSON sidecar protocol over stdio.
 
-use std::io::Write as _;
+use std::io::{IsTerminal, Write as _};
 
-use gray_account::{Reply, account, maker, manifest, publish};
+use gray_account::{Reply, account, cloud, maker, manifest, publish};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -19,6 +19,8 @@ commands:
   login [code]      exchange an enrollment code and store the registry token
   whoami            show the stored token's identity
   logout            revoke and forget the stored token
+  cloud [connect [code]|status|logout|<message>]
+                    your hosted Gray machine on gray.alignment.id
   new <name> [--dir D] [--description TEXT] [--no-repo]
                     scaffold ~/grayplugins/gray-<name> and its GitHub repo
   check             build-free sanity checks: one entry point, manifest handshake
@@ -28,9 +30,11 @@ commands:
   publish [--remote HOST] [--dir PATH]
                     release and publish the plugin in --dir (default: cwd)
   manifest          print the plugin manifest (used by gray at install)
+  version           print the version
   help              show this text
 
-with no arguments, gray-account runs the NDJSON sidecar protocol on stdio.";
+with no arguments on a pipe, gray-account runs the NDJSON sidecar protocol
+on stdio (that is how gray talks to it).";
 
 #[derive(Deserialize)]
 struct Request {
@@ -52,6 +56,7 @@ async fn main() -> anyhow::Result<()> {
         Some("login") => run(account::login(args.get(1).map(String::as_str), true).await),
         Some("whoami") => run(account::whoami().await),
         Some("logout") => run(account::logout().await),
+        Some("cloud") => run(cloud::run(&args[1..], std::io::stdin().is_terminal()).await),
         Some("new" | "check" | "build" | "release") => {
             let cwd = std::env::current_dir()?;
             run(maker::dispatch(&args, &cwd))
@@ -61,9 +66,20 @@ async fn main() -> anyhow::Result<()> {
             println!("{USAGE}");
             Ok(())
         }
-        Some(_) => {
-            eprintln!("{USAGE}");
+        Some("-V" | "--version" | "version") => {
+            println!("gray-account {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
+        Some(other) => {
+            eprintln!("unknown command '{other}'\n\n{USAGE}");
             std::process::exit(2);
+        }
+        // A TTY stdin can never be the host (piped stdin is the spawn
+        // signal), so bare `gray account` in a terminal means "show me what
+        // this is" — print help instead of waiting on sidecar frames.
+        None if std::io::stdin().is_terminal() => {
+            println!("{USAGE}");
+            Ok(())
         }
         None => sidecar().await,
     }

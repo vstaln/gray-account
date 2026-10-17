@@ -11,6 +11,8 @@ pub struct Project {
     pub key: String,
     pub version: String,
     pub description: String,
+    /// SPDX id from `[package] license`; the registry rejects publishes without one.
+    pub license: String,
     /// The single `[[bin]]` that becomes the plugin executable.
     pub bin: String,
 }
@@ -37,7 +39,8 @@ impl Project {
     /// `[[bin]]` names. Plugin manifests are simple; a TOML crate is overkill.
     pub fn parse(root: &Path, text: &str) -> anyhow::Result<Self> {
         let mut section = String::new();
-        let (mut name, mut version, mut description) = (None, None, String::new());
+        let (mut name, mut version, mut description, mut license) =
+            (None, None, String::new(), String::new());
         let mut bins = Vec::new();
         for line in text.lines() {
             let line = line.trim();
@@ -53,6 +56,7 @@ impl Project {
                 ("[package]", "name") => name = Some(v),
                 ("[package]", "version") => version = Some(v),
                 ("[package]", "description") => description = v,
+                ("[package]", "license") => license = v,
                 ("[[bin]]", "name") => bins.push(v),
                 _ => {}
             }
@@ -80,6 +84,7 @@ impl Project {
             key,
             version,
             description,
+            license,
             bin,
         })
     }

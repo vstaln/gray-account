@@ -1,12 +1,13 @@
 //! gray-account: a protocol-1.1 sidecar and CLI plugin for gray.
 //!
-//! Carries the gray.alignment.id account commands — login, whoami, logout —
-//! that used to live in gray core, plus the plugin-maker verbs (`new`,
+//! Carries the gray.alignment.id account commands — login, whoami, logout,
+//! cloud — that used to live in gray core, plus the plugin-maker verbs (`new`,
 //! `check`, `build`, `release`) merged in from the standalone maker plugin.
 //! The token file format and location are unchanged, so a login made by an
 //! older gray keeps working.
 
 pub mod account;
+pub mod cloud;
 pub mod maker;
 pub mod manifest;
 pub mod publish;
@@ -70,6 +71,18 @@ async fn command_run(params: &Value) -> Value {
         }
         "/whoami" => render(account::whoami().await, "whoami"),
         "/logout" => render(account::logout().await, "logout"),
+        "/cloud" => {
+            let argv: Vec<String> = params
+                .get("argv")
+                .and_then(Value::as_array)
+                .map(|argv| {
+                    argv.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            render(cloud::run(&argv, false).await, "cloud")
+        }
         _ => String::new(),
     };
     json!({ "text": text })
@@ -94,12 +107,12 @@ mod tests {
         assert_eq!(m["version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(
             m["commands"],
-            json!(["/login", "/whoami", "/logout", "/maker"])
+            json!(["/login", "/whoami", "/logout", "/maker", "/cloud"])
         );
         assert_eq!(
             m["completion"],
             json!([
-                "login", "whoami", "logout", "new", "check", "build", "release", "publish"
+                "login", "whoami", "logout", "cloud", "new", "check", "build", "release", "publish"
             ])
         );
         assert_eq!(m["tools"], json!([]));

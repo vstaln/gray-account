@@ -26,6 +26,9 @@ pub fn publish(p: &Project) -> anyhow::Result<String> {
             p.version
         );
     }
+    if p.license.trim().is_empty() {
+        anyhow::bail!("Cargo.toml has no [package] license — the registry requires an SPDX id");
+    }
     let token = load_token()?;
     let endpoint = format!("{}/plugins/submit", registry_base()?);
     let body = submission(p, &rec);
@@ -67,6 +70,7 @@ pub fn submission(p: &Project, rec: &Released) -> Value {
         "source_url": rec.url,
         "provided_hash": format!("sha256:{}", rec.sha256),
         "description": p.description.trim(),
+        "license": p.license.trim(),
         "homepage": repo,
         "repo": repo,
         "scope": "user",
