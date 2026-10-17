@@ -36,11 +36,10 @@ impl Built {
 }
 
 pub fn require_clean(root: &Path) -> anyhow::Result<String> {
-    let dirty = run::capture(
-        root,
-        "git",
-        &["status", "--porcelain", "--untracked-files=no"],
-    )?;
+    // Untracked files count: a local build compiles the working tree, so an
+    // uncommitted `src/foo.rs` would ship in a tarball its tag cannot
+    // reproduce. Ignored files (target/, dist/) never appear in porcelain.
+    let dirty = run::capture(root, "git", &["status", "--porcelain"])?;
     if !dirty.is_empty() {
         anyhow::bail!(
             "uncommitted changes — commit first so the release matches its tag:\n{dirty}"
