@@ -28,9 +28,11 @@ commands:
   publish [--remote HOST] [--dir PATH]
                     release and publish the plugin in --dir (default: cwd)
   manifest          print the plugin manifest (used by gray at install)
+  version           print the version
   help              show this text
 
-with no arguments, gray-account runs the NDJSON sidecar protocol on stdio.";
+with no arguments on a pipe, gray-account runs the NDJSON sidecar protocol
+on stdio (that is how gray talks to it).";
 
 #[derive(Deserialize)]
 struct Request {
@@ -59,6 +61,10 @@ async fn main() -> anyhow::Result<()> {
         Some("publish") => run(publish::publish_cli(&args[1..]).await),
         Some("-h" | "--help" | "help") => {
             println!("{USAGE}");
+            Ok(())
+        }
+        Some("-V" | "--version" | "version") => {
+            println!("gray-account {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
         Some(other) => {
