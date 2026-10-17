@@ -64,6 +64,13 @@ pub fn publish(p: &Project) -> anyhow::Result<String> {
 
 pub fn submission(p: &Project, rec: &Released) -> Value {
     let repo = format!("https://github.com/{}", rec.repo);
+    let manifest = manifest_of(p);
+    let str_list = |key: &str| {
+        manifest
+            .get(key)
+            .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok())
+            .unwrap_or_default()
+    };
     json!({
         "name": p.key,
         "version": p.version,
@@ -74,13 +81,17 @@ pub fn submission(p: &Project, rec: &Released) -> Value {
         "homepage": repo,
         "repo": repo,
         "scope": "user",
-        "commands": commands_of(p),
+        "commands": str_list("commands"),
+        "requires_plugins": str_list("requires_plugins"),
+        "conflicts": str_list("conflicts"),
+        "supersedes": str_list("supersedes"),
+        "superseded_by": str_list("superseded_by"),
     })
 }
 
-/// Slash commands from the debug build's manifest (`check` builds it);
-/// empty when unavailable — the registry treats commands as display-only.
-fn commands_of(p: &Project) -> Vec<String> {
+/// The debug build's manifest JSON (`check` builds it); empty object when
+/// unavailable — every field degrades to [] and the registry accepts that.
+fn manifest_of(p: &Project) -> Value {
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| p.root.join("target"));
@@ -90,9 +101,7 @@ fn commands_of(p: &Project) -> Vec<String> {
         .output()
         .ok()
         .and_then(|o| serde_json::from_slice::<Value>(&o.stdout).ok())
-        .and_then(|m| m.get("commands").cloned())
-        .and_then(|c| serde_json::from_value(c).ok())
-        .unwrap_or_default()
+        .unwrap_or(Value::Null)
 }
 
 fn gray_home() -> anyhow::Result<PathBuf> {
