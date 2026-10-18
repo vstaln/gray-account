@@ -54,6 +54,13 @@ mod attach {
         supplanted: bool,
         #[serde(default)]
         reset: bool,
+        #[serde(default)]
+        online: bool,
+    }
+
+    #[derive(Deserialize)]
+    struct TtyStatus {
+        online: bool,
     }
 
     enum ToVm {
@@ -95,6 +102,57 @@ mod attach {
             .map_err(|e| anyhow::anyhow!("{path}: {e}"))
     }
 
+    /// Input carries a client seq so a retry after a dropped connection
+    /// can't double-type into the remote pty — the registry dedupes on it.
+    fn post_input(
+        agent: &ureq::Agent,
+        token: &str,
+        attach_id: i64,
+        iseq: i64,
+        data: &str,
+    ) -> anyhow::Result<()> {
+        let url = crate::account::endpoint("agent/tty/input")?;
+        let body = serde_json::json!({ "data": data, "iseq": iseq, "attach": attach_id });
+        let send = || {
+            agent
+                .post(&url)
+                .set("authorization", &format!("Bearer {token}"))
+                .send_json(body.clone())
+        };
+        match send() {
+            Err(ureq::Error::Transport(_)) => {
+                send().map_err(|e| anyhow::anyhow!("agent/tty/input: {e}"))?;
+            }
+            Err(e) => return Err(anyhow::anyhow!("agent/tty/input: {e}")),
+            Ok(_) => {}
+        }
+        Ok(())
+    }
+
+    fn wait_online(http: &ureq::Agent, token: &str) -> anyhow::Result<()> {
+        let base = crate::account::endpoint("agent/tty/status")?;
+        let deadline = Instant::now() + Duration::from_secs(150);
+        while Instant::now() < deadline {
+            let resp = http
+                .get(&format!("{base}?wait=25000"))
+                .set("authorization", &format!("Bearer {token}"))
+                .timeout(Duration::from_secs(40))
+                .call();
+            match resp {
+                Ok(r) => {
+                    if let Ok(st) = r.into_json::<TtyStatus>()
+                        && st.online
+                    {
+                        return Ok(());
+                    }
+                }
+                Err(ureq::Error::Status(404 | 405, _)) => return Ok(()),
+                Err(_) => std::thread::sleep(Duration::from_secs(2)),
+            }
+        }
+        anyhow::bail!("your machine never came online — try again in a minute")
+    }
+
     pub fn run(token: &str) -> anyhow::Result<()> {
         let http = agent();
         let att: AttachOut =
@@ -104,6 +162,7 @@ mod attach {
         if !att.online {
             writeln!(out, "waking your machine…")?;
             out.flush()?;
+            wait_online(&http, token)?;
         }
 
         let _raw = RawMode::enable()?;
@@ -162,6 +221,7 @@ mod attach {
             let attach_id = att.attach_id;
             std::thread::spawn(move || {
                 let mut after = att.out_seq;
+                let mut was_online = true;
                 let url = crate::account::endpoint("agent/tty/output");
                 while !done.load(Ordering::Relaxed) {
                     let Ok(base) = &url else { break };
@@ -181,8 +241,24 @@ mod attach {
                         }
                     };
                     if payload.supplanted {
+                        let mut out = std::io::stdout();
+                        let _ = out.write_all(
+                            b"\r\n[detached - another client attached to this machine]\r\n",
+                        );
+                        let _ = out.flush();
                         let _ = tx.send(ToVm::Stop);
                         break;
+                    }
+                    if payload.online != was_online {
+                        was_online = payload.online;
+                        let mut out = std::io::stdout();
+                        let note: &[u8] = if was_online {
+                            b"\r\n[machine back online]\r\n"
+                        } else {
+                            b"\r\n[machine unreachable - retrying...]\r\n"
+                        };
+                        let _ = out.write_all(note);
+                        let _ = out.flush();
                     }
                     if payload.reset {
                         let mut out = std::io::stdout();
@@ -203,6 +279,7 @@ mod attach {
 
         let mut last_send = Instant::now() - BATCH_WINDOW;
         let mut pending: Vec<u8> = Vec::new();
+        let mut iseq: i64 = 0;
         loop {
             match rx.recv_timeout(Duration::from_millis(25)) {
                 Ok(ToVm::Bytes(b)) => pending.extend_from_slice(&b),
@@ -220,12 +297,8 @@ mod attach {
             if !pending.is_empty() && (pending.len() > 1024 || last_send.elapsed() >= BATCH_WINDOW)
             {
                 let body = std::mem::take(&mut pending);
-                let _ = post(
-                    &http,
-                    token,
-                    "agent/tty/input",
-                    serde_json::json!({ "data": B64.encode(&body) }),
-                );
+                iseq += 1;
+                let _ = post_input(&http, token, att.attach_id, iseq, &B64.encode(&body));
                 last_send = Instant::now();
             }
         }
