@@ -466,6 +466,34 @@ pub fn prompt_for_code() -> Option<String> {
     }
 }
 
+/// Best-effort browser open for the account page — the printed URL stays
+/// the fallback on headless boxes where no opener exists.
+fn open_in_browser(url: &str) {
+    use std::process::{Command, Stdio};
+    let mut cmd = match std::env::consts::OS {
+        "macos" => {
+            let mut c = Command::new("open");
+            c.arg(url);
+            c
+        }
+        "windows" => {
+            let mut c = Command::new("explorer");
+            c.arg(url);
+            c
+        }
+        _ => {
+            let mut c = Command::new("xdg-open");
+            c.arg(url);
+            c
+        }
+    };
+    let _ = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+}
+
 /// The instructions printed before the prompt. Kept as data so the CLI and
 /// the sidecar return the same words.
 pub fn login_instructions() -> String {
@@ -502,6 +530,7 @@ pub async fn enroll(code: Option<&str>, interactive: bool) -> anyhow::Result<(St
                 "Log in to gray.alignment.id from this machine.\n\n{}\n",
                 login_instructions()
             );
+            open_in_browser(SITE_ACCOUNT_URL);
             match prompt_for_code() {
                 Some(c) => c,
                 None => anyhow::bail!("no enrollment code given — run `gray login <code>`"),
@@ -540,6 +569,7 @@ pub async fn enroll(code: Option<&str>, interactive: bool) -> anyhow::Result<(St
 /// the returned string is everything the caller should print.
 pub async fn login(code: Option<&str>, interactive: bool) -> anyhow::Result<String> {
     if !interactive && code.and_then(normalize_code).is_none() {
+        open_in_browser(SITE_ACCOUNT_URL);
         return Ok(format!(
             "Log in to gray.alignment.id from this machine.\n\n{}\n\nThen run /login <code>.",
             login_instructions()
