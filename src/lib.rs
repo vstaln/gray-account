@@ -81,6 +81,12 @@ async fn command_run(params: &Value) -> Value {
                         .collect()
                 })
                 .unwrap_or_default();
+            if matches!(argv.first().map(String::as_str), None | Some("attach")) {
+                return match cloud::run(&argv, false).await {
+                    Ok(text) => json!({ "terminal": ["cloud", "attach"], "text": text }),
+                    Err(e) => json!({ "text": format!("cloud failed: {e:#}") }),
+                };
+            }
             render(cloud::run(&argv, false).await, "cloud")
         }
         _ => String::new(),
