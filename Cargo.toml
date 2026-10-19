@@ -1,6 +1,6 @@
 [package]
 name = "gray-account"
-version = "0.5.1"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.91"
 license = "MIT"
@@ -32,6 +32,8 @@ tokio = { version = "1", features = [
 ureq = { version = "2", default-features = false, features = ["tls", "json"] }
 base64 = "0.22"
 crossterm = "0.28"
+ratatui = "0.29"
+unicode-width = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

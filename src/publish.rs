@@ -188,7 +188,7 @@ where
 }
 
 /// The public catalog index (`plugins.<key>.{version,author,...}`).
-async fn fetch_index() -> anyhow::Result<Value> {
+pub(crate) async fn fetch_index() -> anyhow::Result<Value> {
     let url = account::endpoint("plugins/index.json")?;
     let resp = account::http_client()?
         .get(&url)
