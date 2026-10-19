@@ -4,7 +4,7 @@
 //! (`new`, `check`, `build`, `release`, `publish`) run as ordinary shell
 //! commands; no arguments starts the NDJSON sidecar protocol over stdio.
 
-use std::io::{IsTerminal, Write as _};
+use std::io::IsTerminal;
 
 use gray_account::{Reply, account, cloud, maker, manifest, marketplace, publish};
 use serde::Deserialize;
@@ -123,12 +123,15 @@ fn run(result: anyhow::Result<String>) -> anyhow::Result<()> {
 }
 
 /// NDJSON sidecar: one JSON request per stdin line, one reply per stdout
-/// line. Notifications (no `id`) are ignored except `plugin/shutdown`,
-/// which exits silently.
+/// line. Requests run concurrently — the `input/submit` hook must answer
+/// at once even while a slow `/cloud status` or marketplace call is in
+/// flight — and every frame goes through [`gray_account::emit`] so replies
+/// and `host/say` requests never interleave mid-line. Lines without a
+/// `method` (gray's replies to our `host/say`) and notifications are
+/// ignored, except `plugin/shutdown`, which exits.
 async fn sidecar() -> anyhow::Result<()> {
     let mut lines =
         tokio::io::AsyncBufReadExt::lines(tokio::io::BufReader::new(tokio::io::stdin()));
-    let mut stdout = std::io::stdout();
     while let Some(line) = lines.next_line().await? {
         if line.trim().is_empty() {
             continue;
@@ -141,25 +144,31 @@ async fn sidecar() -> anyhow::Result<()> {
         if !has_id && request.method != "plugin/shutdown" {
             continue;
         }
-        let reply = gray_account::handle(&request.method, &request.params, has_id).await;
-        let frame = match reply {
-            Reply::Result(ref result) | Reply::ResultThenExit(ref result) => {
-                serde_json::to_string(&json!({
+        if request.method == "plugin/shutdown" {
+            if let Reply::ResultThenExit(result) =
+                gray_account::handle(&request.method, &request.params, has_id).await
+            {
+                gray_account::emit(&json!({
                     "id": request.id.unwrap_or(Value::Null),
                     "result": result,
-                }))?
+                }));
             }
-            Reply::MethodNotFound => serde_json::to_string(&json!({
-                "id": request.id.unwrap_or(Value::Null),
-                "error": { "code": -32601, "message": "method not found" },
-            }))?,
-            Reply::Exit => return Ok(()),
-        };
-        writeln!(stdout, "{frame}")?;
-        stdout.flush()?;
-        if matches!(reply, Reply::ResultThenExit(_)) {
             return Ok(());
         }
+        tokio::spawn(async move {
+            let id = request.id.unwrap_or(Value::Null);
+            let frame = match gray_account::handle(&request.method, &request.params, true).await {
+                Reply::Result(result) | Reply::ResultThenExit(result) => {
+                    json!({ "id": id, "result": result })
+                }
+                Reply::MethodNotFound => json!({
+                    "id": id,
+                    "error": { "code": -32601, "message": "method not found" },
+                }),
+                Reply::Exit => return,
+            };
+            gray_account::emit(&frame);
+        });
     }
     Ok(())
 }

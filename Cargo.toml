@@ -28,6 +28,8 @@ tokio = { version = "1", features = [
   "rt-multi-thread",
   "io-std",
   "io-util",
+  "sync",
+  "time",
 ] }
 ureq = { version = "2", default-features = false, features = ["tls", "json"] }
 base64 = "0.22"
@@ -37,6 +39,7 @@ unicode-width = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { version = "1", features = ["test-util"] }
 
 [profile.release]
 strip = true
