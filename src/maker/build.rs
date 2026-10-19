@@ -166,46 +166,30 @@ fn build_remote(p: &Project, host: &str) -> anyhow::Result<PathBuf> {
 }
 
 /// Tar the entries flat, mode 0755, root-owned, epoch mtime, gzip without a
-/// timestamp: identical inputs give byte-identical tarballs.
+/// timestamp: identical inputs give byte-identical tarballs. Built
+/// in-process — `tar`/`gzip` CLIs are not a portability boundary we own
+/// (Windows has no gzip; bsdtar lacks the GNU flags).
 fn package(p: &Project, entries: &[(String, PathBuf)]) -> anyhow::Result<PathBuf> {
-    let stage = p.dist().join(".stage");
-    let _ = std::fs::remove_dir_all(&stage);
-    std::fs::create_dir_all(&stage)?;
-    for (name, src) in entries {
-        let dst = stage.join(name);
-        std::fs::copy(src, &dst)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o755))?;
-        }
-    }
     let out = p.tarball_path();
-    let names: Vec<&str> = entries.iter().map(|(n, _)| n.as_str()).collect();
-    let tar = Command::new("tar")
-        .args([
-            "--owner=0",
-            "--group=0",
-            "--numeric-owner",
-            "--mtime=@0",
-            "--sort=name",
-            "-cf",
-            "-",
-            "-C",
-        ])
-        .arg(&stage)
-        .args(&names)
-        .stdout(Stdio::piped())
-        .spawn()?;
-    let gz = Command::new("gzip")
-        .args(["-n", "-9"])
-        .stdin(tar.stdout.expect("piped"))
-        .output()?;
-    if !gz.status.success() || gz.stdout.is_empty() {
-        anyhow::bail!("packaging {} failed", out.display());
+    let gz = flate2::GzBuilder::new().mtime(0).write(
+        std::fs::File::create(&out)?,
+        flate2::Compression::best(),
+    );
+    let mut t = tar::Builder::new(gz);
+    let mut sorted: Vec<&(String, PathBuf)> = entries.iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    for (name, src) in sorted {
+        let mut f = std::fs::File::open(src)?;
+        let mut h = tar::Header::new_gnu();
+        h.set_size(f.metadata()?.len());
+        h.set_mode(0o755);
+        h.set_uid(0);
+        h.set_gid(0);
+        h.set_mtime(0);
+        h.set_cksum();
+        t.append_data(&mut h, name.as_str(), &mut f)?;
     }
-    std::fs::write(&out, gz.stdout)?;
-    std::fs::remove_dir_all(&stage)?;
+    t.into_inner()?.finish()?;
     Ok(out)
 }
 
