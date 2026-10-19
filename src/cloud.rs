@@ -572,7 +572,15 @@ async fn chat(words: &[String], fresh: bool, interactive: bool) -> anyhow::Resul
     let token = require_token(interactive).await?;
     let message = words.join(" ");
     if message.trim().is_empty() {
-        return status_text(&client, &token).await;
+        if !fresh {
+            return status_text(&client, &token).await;
+        }
+        // Bare `new`: rotate the seat's conversation pointer — the next
+        // one-shot, web chat, or gateway message lands in a fresh session.
+        post_chat(&client, &token, "", true).await?;
+        return Ok(
+            "new conversation — your next message starts with a clean slate".to_string(),
+        );
     }
     let guard = thinking_guard(interactive);
     let out = post_chat(&client, &token, &message, fresh).await;
@@ -583,7 +591,10 @@ async fn chat(words: &[String], fresh: bool, interactive: bool) -> anyhow::Resul
 /// `gray cloud …` entry point: subcommand dispatch plus the chat fallback,
 /// where anything that is not a known verb is the message.
 pub async fn run(args: &[String], interactive: bool) -> anyhow::Result<String> {
-    match args.first().map(String::as_str) {
+    // `/verb` and `verb` are the same thing — slash style is what users type
+    // inside the REPL and it must not fall through to the message path.
+    let verb = args.first().map(|s| s.strip_prefix('/').unwrap_or(s));
+    match verb {
         #[cfg(unix)]
         None | Some("attach")
             if interactive
