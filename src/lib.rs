@@ -82,11 +82,13 @@ async fn command_run(params: &Value) -> Value {
         }
         "/cloud" => {
             let argv = argv_of(params);
-            if matches!(argv.first().map(String::as_str), None | Some("attach")) {
-                return match cloud::run(&argv, false).await {
-                    Ok(text) => json!({ "terminal": ["cloud", "attach"], "text": text }),
-                    Err(e) => json!({ "text": format!("cloud failed: {e:#}") }),
-                };
+            if matches!(
+                argv.first().map(String::as_str),
+                None | Some("attach") | Some("tty")
+            ) {
+                let mut term = vec!["cloud".to_string()];
+                term.extend(argv.iter().cloned());
+                return json!({ "terminal": term, "text": "connecting to gray cloud…" });
             }
             render(cloud::run(&argv, false).await, "cloud")
         }

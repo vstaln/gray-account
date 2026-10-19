@@ -86,9 +86,9 @@ mod attach {
         Stop,
     }
 
-    struct RemoteScreen;
+    pub(super) struct RemoteScreen;
     impl RemoteScreen {
-        fn enter() -> anyhow::Result<Self> {
+        pub(super) fn enter() -> anyhow::Result<Self> {
             crossterm::terminal::enable_raw_mode()?;
             let mut out = std::io::stdout();
             let _ = out.write_all(b"\x1b[?1049h\x1b[H\x1b[2J");
@@ -105,13 +105,13 @@ mod attach {
         }
     }
 
-    fn agent() -> ureq::Agent {
+    pub(super) fn agent() -> ureq::Agent {
         ureq::AgentBuilder::new()
             .timeout_connect(Duration::from_secs(10))
             .build()
     }
 
-    fn post(
+    pub(super) fn post(
         agent: &ureq::Agent,
         token: &str,
         path: &str,
@@ -154,7 +154,7 @@ mod attach {
         Ok(())
     }
 
-    fn wait_online(http: &ureq::Agent, token: &str) -> anyhow::Result<()> {
+    pub(super) fn wait_online(http: &ureq::Agent, token: &str) -> anyhow::Result<()> {
         let base = crate::account::endpoint("agent/tty/status")?;
         let deadline = Instant::now() + Duration::from_secs(150);
         while Instant::now() < deadline {
@@ -383,13 +383,411 @@ mod attach {
     }
 }
 
+#[cfg(unix)]
+mod chat {
+    //! `gray cloud` on a tty: a LOCAL chat loop against `agent/chat`.
+    //! Keystrokes echo instantly and the server only sees whole submitted
+    //! lines — the old tty byte-stream turned every letter into a network
+    //! round trip. `gray cloud tty` keeps the raw remote screen for when
+    //! the real remote TUI is wanted.
+
+    use std::io::{Read, Write};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    use super::ChatOut;
+    use super::attach::{self, RemoteScreen};
+    use crate::ui::{dim, line};
+
+    /// Local escapes: Ctrl-] detaches; Ctrl-D/Ctrl-C do too — muscle
+    /// memory should never trap the terminal.
+    const DETACH: u8 = 0x1d;
+    const EOF_KEY: u8 = 0x04;
+    const INT_KEY: u8 = 0x03;
+    /// A whole turn can ride a cold VM boot: the same clock the async
+    /// chat path uses.
+    const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+    /// A lone ESC might be the Escape key, not a sequence start: swallow
+    /// CSI/SS3 bytes only while they arrive together.
+    const ESC_GRACE: Duration = Duration::from_millis(40);
+
+    /// Input from the stdin pump.
+    pub(crate) enum In {
+        Bytes(Vec<u8>),
+        /// stdin EOF or read error: detach.
+        End,
+    }
+
+    /// Byte-level input events the line editor reacts to.
+    #[derive(Debug, PartialEq, Eq)]
+    pub(crate) enum Ev {
+        Char(char),
+        Submit,
+        Detach,
+    }
+
+    /// Raw bytes → edit events: UTF-8 accumulation, CSI/SS3 swallow,
+    /// bracketed-paste (pasted newlines never submit).
+    #[derive(Default)]
+    pub(crate) struct Parser {
+        utf8: Vec<u8>,
+        esc: Option<(Instant, Vec<u8>)>,
+        paste: bool,
+    }
+
+    impl Parser {
+        pub(crate) fn feed(&mut self, b: u8, ev: &mut Vec<Ev>) {
+            if let Some((started, seq)) = self.esc.as_mut() {
+                if seq.is_empty() && b != b'[' && b != b'O' {
+                    self.esc = None;
+                } else {
+                    seq.push(b);
+                    let done = match seq[0] {
+                        b'[' => seq.len() > 1 && (0x40..=0x7e).contains(&b),
+                        _ => seq.len() > 1,
+                    };
+                    if done {
+                        match seq.as_slice() {
+                            b"[200~" => self.paste = true,
+                            b"[201~" => self.paste = false,
+                            _ => {}
+                        }
+                        self.esc = None;
+                    } else if started.elapsed() > ESC_GRACE {
+                        self.esc = None;
+                    }
+                    return;
+                }
+            }
+            match b {
+                0x1b => self.esc = Some((Instant::now(), Vec::new())),
+                DETACH | EOF_KEY | INT_KEY => ev.push(Ev::Detach),
+                b'\r' | b'\n' if !self.paste => ev.push(Ev::Submit),
+                _ => {
+                    self.utf8.push(b);
+                    if utf8_complete(&self.utf8) {
+                        for c in String::from_utf8_lossy(&self.utf8).chars() {
+                            ev.push(Ev::Char(if c == '\r' || c == '\n' { ' ' } else { c }));
+                        }
+                        self.utf8.clear();
+                    }
+                }
+            }
+        }
+    }
+
+    fn utf8_complete(buf: &[u8]) -> bool {
+        let Some(&b0) = buf.first() else { return false };
+        let need = if b0 < 0x80 {
+            1
+        } else if b0 >= 0xf0 {
+            4
+        } else if b0 >= 0xe0 {
+            3
+        } else if b0 >= 0xc0 {
+            2
+        } else {
+            1
+        };
+        buf.len() >= need
+    }
+
+    /// `/new` rotates the conversation; `/exit` detaches; anything else is
+    /// the message. Returns `(fresh, message)`.
+    fn split_verb(line: &str) -> (bool, &str) {
+        match line.strip_prefix("/new") {
+            Some(rest) if rest.is_empty() || rest.starts_with(' ') => (true, rest.trim_start()),
+            _ => (false, line),
+        }
+    }
+
+    fn prompt(out: &mut dyn Write, in_flight: Option<Instant>, buf: &str) -> std::io::Result<()> {
+        let status = in_flight
+            .map(|t| format!("· thinking {}s", t.elapsed().as_secs()))
+            .unwrap_or_default();
+        write!(out, "\r\x1b[2K")?;
+        if !status.is_empty() {
+            write!(out, "{}  ", dim(&status))?;
+        }
+        write!(out, "{} {buf}", dim("›"))?;
+        out.flush()
+    }
+
+    /// Move the submitted line into the transcript and drop to a new row.
+    fn echo_sent(out: &mut dyn Write, msg: &str) -> std::io::Result<()> {
+        write!(out, "\r\x1b[2K{} {msg}\r\n", dim("›"))
+    }
+
+    /// The whole loop, transport-free for tests: input bytes arrive on
+    /// `rx`, replies render on `out`, and `send` does one request per
+    /// submitted line. Local echo only — the network sees Enter, never
+    /// keystrokes.
+    pub(crate) fn loop_io(
+        rx: &mpsc::Receiver<In>,
+        out: &mut dyn Write,
+        send: impl FnMut(&str) -> Result<String, String> + Send + 'static,
+    ) -> std::io::Result<()> {
+        let (job_tx, job_rx) = mpsc::channel::<String>();
+        let (res_tx, res_rx) = mpsc::channel::<Result<String, String>>();
+        let mut send = send;
+        std::thread::spawn(move || {
+            while let Ok(msg) = job_rx.recv() {
+                if res_tx.send(send(&msg)).is_err() {
+                    break;
+                }
+            }
+        });
+
+        let mut parser = Parser::default();
+        let mut line_buf = String::new();
+        let mut pending: Option<String> = None;
+        let mut in_flight: Option<Instant> = None;
+        let mut shown_secs = u64::MAX;
+
+        let drain_replies = |out: &mut dyn Write,
+                             in_flight: &mut Option<Instant>,
+                             pending: &mut Option<String>,
+                             shown_secs: &mut u64,
+                             line_buf: &str|
+         -> std::io::Result<()> {
+            while let Ok(res) = res_rx.try_recv() {
+                *in_flight = None;
+                write!(out, "\r\x1b[2K")?;
+                match res {
+                    Ok(text) => {
+                        for l in text.trim_end().lines() {
+                            write!(out, "{l}\r\n")?;
+                        }
+                    }
+                    Err(e) => write!(out, "{}\r\n", line("◇", "send failed", &format!(" · {e}")))?,
+                }
+                if let Some(msg) = pending.take() {
+                    *in_flight = Some(Instant::now());
+                    *shown_secs = u64::MAX;
+                    echo_sent(out, &msg)?;
+                    let _ = job_tx.send(msg);
+                }
+                prompt(out, *in_flight, line_buf)?;
+            }
+            Ok(())
+        };
+
+        prompt(out, None, &line_buf)?;
+
+        loop {
+            drain_replies(
+                out,
+                &mut in_flight,
+                &mut pending,
+                &mut shown_secs,
+                &line_buf,
+            )?;
+
+            let chunk = match rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(In::Bytes(b)) => b,
+                Ok(In::End) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => Vec::new(),
+            };
+
+            let mut evs = Vec::new();
+            for b in chunk {
+                parser.feed(b, &mut evs);
+            }
+            for ev in evs {
+                match ev {
+                    Ev::Detach => return Ok(()),
+                    Ev::Char(c) => {
+                        line_buf.push(c);
+                        prompt(out, in_flight, &line_buf)?;
+                    }
+                    Ev::Submit => {
+                        let msg = line_buf.trim().to_string();
+                        line_buf.clear();
+                        if msg.is_empty() {
+                            prompt(out, in_flight, &line_buf)?;
+                        } else if in_flight.is_some() {
+                            echo_sent(out, &msg)?;
+                            pending = Some(msg);
+                            prompt(out, in_flight, &line_buf)?;
+                        } else {
+                            in_flight = Some(Instant::now());
+                            shown_secs = u64::MAX;
+                            echo_sent(out, &msg)?;
+                            let _ = job_tx.send(msg);
+                            prompt(out, in_flight, &line_buf)?;
+                        }
+                    }
+                }
+            }
+
+            if let Some(t) = in_flight {
+                let secs = t.elapsed().as_secs();
+                if secs != shown_secs {
+                    shown_secs = secs;
+                    prompt(out, in_flight, &line_buf)?;
+                }
+            }
+        }
+        // A reply that landed just before detach still prints — the turn
+        // was paid for; give an in-flight one a short grace to arrive.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while in_flight.is_some() && Instant::now() < deadline {
+            drain_replies(
+                out,
+                &mut in_flight,
+                &mut pending,
+                &mut shown_secs,
+                &line_buf,
+            )?;
+            if in_flight.is_some() {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        drain_replies(
+            out,
+            &mut in_flight,
+            &mut pending,
+            &mut shown_secs,
+            &line_buf,
+        )?;
+        Ok(())
+    }
+
+    /// One `agent/chat` POST; a 404 provisions the seat first, the same
+    /// retry the async `post_chat` makes.
+    fn send(http: &ureq::Agent, token: &str, msg: &str) -> Result<String, String> {
+        let chat = crate::account::endpoint("agent/chat").map_err(|e| e.to_string())?;
+        let prov = crate::account::endpoint("agent/provision").map_err(|e| e.to_string())?;
+        send_to(http, token, &chat, &prov, msg)
+    }
+
+    pub(crate) fn send_to(
+        http: &ureq::Agent,
+        token: &str,
+        chat_url: &str,
+        prov_url: &str,
+        msg: &str,
+    ) -> Result<String, String> {
+        let (fresh, message) = split_verb(msg);
+        let body = serde_json::json!({ "message": message, "fresh": fresh });
+        let call = || {
+            http.post(chat_url)
+                .set("authorization", &format!("Bearer {token}"))
+                .timeout(REQUEST_TIMEOUT)
+                .send_json(body.clone())
+        };
+        let resp = match call() {
+            Ok(r) => r,
+            Err(ureq::Error::Status(404, _)) => {
+                http.post(prov_url)
+                    .set("authorization", &format!("Bearer {token}"))
+                    .send_json(serde_json::json!({}))
+                    .map_err(|e| e.to_string())?;
+                call().map_err(|e| e.to_string())?
+            }
+            Err(ureq::Error::Status(code, r)) => {
+                let detail = r.into_string().unwrap_or_default();
+                return Err(format!("{code} {}", detail.trim()).trim().to_string());
+            }
+            Err(e) => return Err(e.to_string()),
+        };
+        resp.into_json::<ChatOut>()
+            .map(|c| c.response.trim_end().to_string())
+            .map_err(|e| e.to_string())
+    }
+
+    /// `gray cloud` / `gray cloud attach`: connect banner immediately,
+    /// machine-online wait, then the local chat loop.
+    pub fn run(token: &str) -> anyhow::Result<()> {
+        let http = attach::agent();
+        let screen = RemoteScreen::enter()?;
+        let mut out = std::io::stdout();
+        write!(out, "{}\r\n", line("◆", "gray cloud", " · connecting…"))?;
+        out.flush()?;
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let ticker = {
+            let stop = stop.clone();
+            let start = Instant::now();
+            std::thread::spawn(move || {
+                let mut out = std::io::stdout();
+                while !stop.load(Ordering::Relaxed) {
+                    let s = format!(
+                        "· {}s — first boot takes a couple of minutes",
+                        start.elapsed().as_secs()
+                    );
+                    let _ = write!(out, "\r\x1b[2K{}", dim(&s));
+                    let _ = out.flush();
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+            })
+        };
+        let res = attach::wait_online(&http, token);
+        stop.store(true, Ordering::Relaxed);
+        let _ = ticker.join();
+        write!(out, "\r\x1b[2K")?;
+        res?;
+        write!(
+            out,
+            "{}\r\n\r\n",
+            line(
+                "◆",
+                "gray cloud",
+                " · connected · type + enter to send · ctrl-] to detach"
+            )
+        )?;
+        out.flush()?;
+
+        let (tx, rx) = mpsc::channel::<In>();
+        std::thread::spawn(move || {
+            let mut stdin = std::io::stdin();
+            let mut buf = [0u8; 4096];
+            loop {
+                match stdin.read(&mut buf) {
+                    Ok(0) | Err(_) => {
+                        let _ = tx.send(In::End);
+                        break;
+                    }
+                    Ok(n) => {
+                        if tx.send(In::Bytes(buf[..n].to_vec())).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        {
+            let http = http.clone();
+            let token = token.to_string();
+            let send = move |msg: &str| send(&http, &token, msg);
+            loop_io(&rx, &mut out, send)?;
+        }
+
+        drop(screen);
+        writeln!(
+            out,
+            "\r\n\x1b[J{}",
+            line(
+                "◆",
+                "detached",
+                " · your cloud session keeps running · /cloud to reattach"
+            )
+        )?;
+        Ok(())
+    }
+}
+
 const USAGE: &str = "gray cloud — your hosted Gray machine
 
 usage: gray cloud [command] [args]
 
 commands:
-  (no args)        attach to the live remote session — same UI, remote brain
+  (no args)        chat with your machine — type locally, sends on enter
   attach           same as bare `gray cloud`
+  tty              raw attach to the live remote session's screen (legacy)
   connect [code]   pair this terminal with a one-time code from the account page
   status           provision if needed and print the machine's state
   logout           revoke the stored token and forget the pairing
@@ -578,9 +976,7 @@ async fn chat(words: &[String], fresh: bool, interactive: bool) -> anyhow::Resul
         // Bare `new`: rotate the seat's conversation pointer — the next
         // one-shot, web chat, or gateway message lands in a fresh session.
         post_chat(&client, &token, "", true).await?;
-        return Ok(
-            "new conversation — your next message starts with a clean slate".to_string(),
-        );
+        return Ok("new conversation — your next message starts with a clean slate".to_string());
     }
     let guard = thinking_guard(interactive);
     let out = post_chat(&client, &token, &message, fresh).await;
@@ -596,18 +992,25 @@ pub async fn run(args: &[String], interactive: bool) -> anyhow::Result<String> {
     let verb = args.first().map(|s| s.strip_prefix('/').unwrap_or(s));
     match verb {
         #[cfg(unix)]
-        None | Some("attach")
+        None | Some("attach") | Some("tty")
             if interactive
                 && std::io::IsTerminal::is_terminal(&std::io::stdout())
                 && std::io::IsTerminal::is_terminal(&std::io::stdin()) =>
         {
             let token = require_token(interactive).await?;
-            tokio::task::spawn_blocking(move || attach::run(&token))
-                .await
-                .map_err(|e| anyhow::anyhow!("attach worker: {e}"))??;
+            let raw_tty = matches!(args.first().map(String::as_str), Some("tty"));
+            tokio::task::spawn_blocking(move || {
+                if raw_tty {
+                    attach::run(&token)
+                } else {
+                    chat::run(&token)
+                }
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("attach worker: {e}"))??;
             Ok(String::new())
         }
-        None | Some("status") | Some("attach") => {
+        None | Some("status") | Some("attach") | Some("tty") => {
             let client = http_client()?;
             let token = require_token(interactive).await?;
             status_text(&client, &token).await
@@ -617,5 +1020,274 @@ pub async fn run(args: &[String], interactive: bool) -> anyhow::Result<String> {
         Some("logout") => account::logout().await,
         Some("new") => chat(&args[1..], true, interactive).await,
         Some(_) => chat(args, false, interactive).await,
+    }
+}
+
+#[cfg(all(test, unix))]
+mod chat_tests {
+    //! End-to-end for the local-echo chat loop: input bytes in, transcript
+    //! bytes out, and exactly one request per submitted line.
+
+    use super::chat::{self, In, Parser};
+    use std::io::Read;
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    fn evs_of(p: &mut Parser, bytes: &[u8]) -> Vec<chat::Ev> {
+        let mut evs = Vec::new();
+        for &b in bytes {
+            p.feed(b, &mut evs);
+        }
+        evs
+    }
+
+    use chat::Ev;
+
+    #[test]
+    fn parser_plain_text_submits_on_enter() {
+        let mut p = Parser::default();
+        assert_eq!(
+            evs_of(&mut p, b"hi\r"),
+            vec![Ev::Char('h'), Ev::Char('i'), Ev::Submit]
+        );
+    }
+
+    #[test]
+    fn parser_detach_and_eof_keys() {
+        let mut p = Parser::default();
+        assert_eq!(evs_of(&mut p, b"\x1d"), vec![Ev::Detach]);
+        assert_eq!(evs_of(&mut p, b"\x04"), vec![Ev::Detach]);
+        assert_eq!(evs_of(&mut p, b"\x03"), vec![Ev::Detach]);
+    }
+
+    #[test]
+    fn parser_swallows_csi_and_arrow_sequences() {
+        let mut p = Parser::default();
+        // left arrow ESC[D then 'a'
+        assert_eq!(evs_of(&mut p, b"\x1b[Da"), vec![Ev::Char('a')]);
+    }
+
+    #[test]
+    fn parser_paste_never_submits() {
+        let mut p = Parser::default();
+        let evs = evs_of(&mut p, b"\x1b[200~line1\nline2\x1b[201~\r");
+        assert!(evs.contains(&Ev::Char(' ')), "{evs:?}");
+        assert_eq!(
+            evs.iter().filter(|e| **e == Ev::Submit).count(),
+            1,
+            "{evs:?}"
+        );
+    }
+
+    /// Drive loop_io on a thread; returns its transcript once input ends.
+    fn drive(
+        chunks: Vec<In>,
+        send: impl FnMut(&str) -> Result<String, String> + Send + 'static,
+    ) -> String {
+        let (tx, rx) = mpsc::channel::<In>();
+        let handle = std::thread::spawn(move || {
+            let mut out: Vec<u8> = Vec::new();
+            chat::loop_io(&rx, &mut out, send).unwrap();
+            String::from_utf8_lossy(&out).to_string()
+        });
+        for c in chunks {
+            tx.send(c).unwrap();
+        }
+        tx.send(In::End).unwrap();
+        drop(tx);
+        handle.join().unwrap()
+    }
+
+    #[test]
+    fn keystrokes_echo_locally_without_any_send() {
+        let (calls_tx, calls_rx) = mpsc::channel::<String>();
+        let send = move |m: &str| {
+            calls_tx.send(m.to_string()).unwrap();
+            Ok("pong".to_string())
+        };
+        let out = drive(vec![In::Bytes(b"hel".to_vec())], send);
+        assert!(out.contains("hel"), "{out:?}");
+        assert!(calls_rx.try_recv().is_err(), "no Enter — nothing sent");
+    }
+
+    #[test]
+    fn enter_sends_once_and_reply_renders() {
+        let (calls_tx, calls_rx) = mpsc::channel::<String>();
+        let send = move |m: &str| {
+            calls_tx.send(m.to_string()).unwrap();
+            Ok("pong".to_string())
+        };
+        let out = drive(vec![In::Bytes(b"hi there\r".to_vec())], send);
+        assert_eq!(calls_rx.recv().unwrap(), "hi there");
+        assert!(calls_rx.try_recv().is_err(), "exactly one send per Enter");
+        assert!(out.contains("hi there") && out.contains("pong"), "{out:?}");
+    }
+
+    #[test]
+    fn typing_during_a_reply_stays_local_and_queues_once() {
+        let (calls_tx, calls_rx) = mpsc::channel::<String>();
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let send = move |m: &str| {
+            calls_tx.send(m.to_string()).unwrap();
+            gate_rx.recv().unwrap();
+            Ok(format!("re:{m}"))
+        };
+        let (tx, rx) = mpsc::channel::<In>();
+        let handle = std::thread::spawn(move || {
+            let mut out: Vec<u8> = Vec::new();
+            chat::loop_io(&rx, &mut out, send).unwrap();
+            String::from_utf8_lossy(&out).to_string()
+        });
+        tx.send(In::Bytes(b"first\r".to_vec())).unwrap();
+        assert_eq!(calls_rx.recv().unwrap(), "first"); // in flight now
+        tx.send(In::Bytes(b"second\r".to_vec())).unwrap(); // queued locally
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(calls_rx.try_recv().is_err(), "queued, not sent yet");
+        gate_tx.send(()).unwrap(); // reply lands
+        assert_eq!(calls_rx.recv().unwrap(), "second"); // auto-sent
+        gate_tx.send(()).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        tx.send(In::End).unwrap();
+        let out = handle.join().unwrap();
+        assert!(
+            out.contains("re:first") && out.contains("re:second"),
+            "{out:?}"
+        );
+    }
+
+    /// A scripted HTTP/1.1 responder: each accepted connection reads one
+    /// request, records (path, body), and answers from a response script
+    /// that can vary per hit (e.g. first chat 404 then 200).
+    struct Stub {
+        base: String,
+        hits: mpsc::Receiver<(String, String)>,
+    }
+
+    fn stub(scripts: Vec<(&'static str, Vec<(u16, &'static str)>)>) -> Stub {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (hits_tx, hits_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut used: std::collections::HashMap<String, usize> = Default::default();
+            while let Ok((mut s, _)) = listener.accept() {
+                let mut req = Vec::new();
+                let mut b = [0u8; 8192];
+                loop {
+                    let n = s.read(&mut b).unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    req.extend_from_slice(&b[..n]);
+                    if let Some(pos) = req.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&req[..pos]).to_string();
+                        let len: usize = headers
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length: ")
+                                    .map(|v| v.trim().parse().unwrap_or(0))
+                            })
+                            .unwrap_or(0);
+                        if req.len() >= pos + 4 + len {
+                            break;
+                        }
+                    }
+                    if req.len() > 65536 {
+                        break;
+                    }
+                }
+                let text = String::from_utf8_lossy(&req).to_string();
+                let path = text
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("")
+                    .to_string();
+                let body = text.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+                let _ = hits_tx.send((path.clone(), body));
+                let n = *used.get(&path).unwrap_or(&0);
+                used.insert(path.clone(), n + 1);
+                let script = scripts.iter().find(|(p, _)| *p == path);
+                let (code, resp_body) = script
+                    .and_then(|(_, s)| s.get(n).or_else(|| s.last()))
+                    .copied()
+                    .unwrap_or((404, "{}"));
+                let reason = if code == 200 { "OK" } else { "Not Found" };
+                let resp = format!(
+                    "HTTP/1.1 {code} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    resp_body.len(),
+                    resp_body
+                );
+                use std::io::Write;
+                let _ = s.write_all(resp.as_bytes());
+            }
+        });
+        Stub {
+            base: format!("http://127.0.0.1:{port}"),
+            hits: hits_rx,
+        }
+    }
+
+    #[test]
+    fn chat_post_sends_the_message_and_reads_the_reply() {
+        let stub = stub(vec![("/agent/chat", vec![(200, r#"{"response":"pong"}"#)])]);
+        let http = ureq::AgentBuilder::new().build();
+        let out = chat::send_to(
+            &http,
+            "tok",
+            &format!("{}/agent/chat", stub.base),
+            &format!("{}/agent/provision", stub.base),
+            "hello",
+        )
+        .unwrap();
+        assert_eq!(out, "pong");
+        let (path, body) = stub.hits.recv().unwrap();
+        assert_eq!(path, "/agent/chat");
+        assert!(body.contains("\"hello\""), "{body}");
+        assert!(body.contains("\"fresh\":false"), "{body}");
+    }
+
+    #[test]
+    fn chat_404_provisions_then_retries_once() {
+        let stub = stub(vec![
+            (
+                "/agent/chat",
+                vec![(404, "{}"), (200, r#"{"response":"after-provision"}"#)],
+            ),
+            ("/agent/provision", vec![(200, "{}")]),
+        ]);
+        let http = ureq::AgentBuilder::new().build();
+        let out = chat::send_to(
+            &http,
+            "tok",
+            &format!("{}/agent/chat", stub.base),
+            &format!("{}/agent/provision", stub.base),
+            "hi",
+        )
+        .unwrap();
+        assert_eq!(out, "after-provision");
+        let paths: Vec<String> = (0..3).map(|_| stub.hits.recv().unwrap().0).collect();
+        assert_eq!(
+            paths,
+            vec!["/agent/chat", "/agent/provision", "/agent/chat"]
+        );
+    }
+
+    #[test]
+    fn chat_new_verb_sets_fresh() {
+        let stub = stub(vec![("/agent/chat", vec![(200, r#"{"response":"ok"}"#)])]);
+        let http = ureq::AgentBuilder::new().build();
+        chat::send_to(
+            &http,
+            "tok",
+            &format!("{}/agent/chat", stub.base),
+            &format!("{}/agent/provision", stub.base),
+            "/new start over",
+        )
+        .unwrap();
+        let (_, body) = stub.hits.recv().unwrap();
+        assert!(body.contains("\"fresh\":true"), "{body}");
+        assert!(body.contains("start over"), "{body}");
     }
 }
