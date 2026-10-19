@@ -37,6 +37,69 @@ mod attach {
     const B64: base64::engine::general_purpose::GeneralPurpose =
         base64::engine::general_purpose::STANDARD;
 
+    /// gray's working shimmer: a bright band sweeps across the label every
+    /// 2s — the same curve and colors the composer paints `⬡ Working…` with.
+    fn shimmer(text: &str, elapsed: Duration) -> String {
+        if std::env::var_os("NO_COLOR").is_some() {
+            return text.to_string();
+        }
+        let chars: Vec<char> = text.chars().collect();
+        let padding = 10usize;
+        let period = chars.len() + padding * 2;
+        let pos = ((elapsed.as_secs_f32() % 2.0) / 2.0 * period as f32) as usize;
+        let (base, hilite) = ([150.0f32, 148.0, 144.0], [240.0f32, 240.0, 240.0]);
+        let mut out = String::new();
+        for (i, ch) in chars.iter().enumerate() {
+            let dist = ((i + padding) as f32 - pos as f32).abs();
+            let t = if dist <= 5.0 {
+                0.5 * (1.0 + (std::f32::consts::PI * (dist / 5.0)).cos())
+            } else {
+                0.0
+            };
+            let k = t.clamp(0.0, 1.0) * 0.9;
+            let c: Vec<u8> = (0..3)
+                .map(|j| (base[j] + (hilite[j] - base[j]) * k).round() as u8)
+                .collect();
+            let bold = if t > 0.3 { "\x1b[1m" } else { "" };
+            out.push_str(&format!(
+                "\x1b[38;2;{};{};{}m{bold}{ch}\x1b[0m",
+                c[0], c[1], c[2]
+            ));
+        }
+        out
+    }
+
+    fn dim(text: &str) -> String {
+        if std::env::var_os("NO_COLOR").is_some() {
+            return text.to_string();
+        }
+        format!("\x1b[2m{text}\x1b[0m")
+    }
+
+    /// One status line in gray's accent: a mark, a bold head, a dim tail.
+    /// NO_COLOR keeps the words and drops the paint.
+    fn line(mark: &str, head: &str, tail: &str) -> String {
+        if std::env::var_os("NO_COLOR").is_some() {
+            return format!("{mark} {head}{tail}");
+        }
+        format!("\x1b[38;2;246;173;126m{mark}\x1b[0m \x1b[1m{head}\x1b[0m\x1b[2m{tail}\x1b[0m")
+    }
+
+    /// Nudge the remote pty one row short and back: two SIGWINCHes make the
+    /// remote gray repaint its whole screen, since attach only streams new
+    /// output.
+    fn repaint(tx: &mpsc::Sender<ToVm>) {
+        let (c, r) = crossterm::terminal::size().unwrap_or((0, 0));
+        let _ = tx.send(ToVm::Resize(c, r.saturating_sub(1).max(1)));
+        let _ = tx.send(ToVm::Resize(c, r));
+    }
+
+    fn note(mark: &str, head: &str, tail: &str) {
+        let mut out = std::io::stdout();
+        let _ = write!(out, "\r\n{}\r\n", line(mark, head, tail));
+        let _ = out.flush();
+    }
+
     #[derive(Deserialize)]
     struct AttachOut {
         attach_id: i64,
@@ -160,10 +223,43 @@ mod attach {
 
         let mut out = std::io::stdout();
         if !att.online {
-            writeln!(out, "waking your machine…")?;
-            out.flush()?;
-            wait_online(&http, token)?;
+            let stop = std::sync::Arc::new(AtomicBool::new(false));
+            let ticker = {
+                let stop = stop.clone();
+                let start = Instant::now();
+                std::thread::spawn(move || {
+                    let mut out = std::io::stdout();
+                    let _ = write!(out, "\x1b[?25l");
+                    while !stop.load(Ordering::Relaxed) {
+                        let elapsed = start.elapsed();
+                        let tail = format!(
+                            " {}s · first boot takes a couple of minutes",
+                            elapsed.as_secs()
+                        );
+                        let _ = write!(
+                            out,
+                            "\r\x1b[2K{}{}",
+                            shimmer(" ⬡ waking your Gray machine…", elapsed),
+                            dim(&tail)
+                        );
+                        let _ = out.flush();
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    let _ = write!(out, "\x1b[?25h");
+                })
+            };
+            let woke = wait_online(&http, token);
+            stop.store(true, Ordering::Relaxed);
+            let _ = ticker.join();
+            write!(out, "\r\x1b[2K")?;
+            woke?;
         }
+        writeln!(
+            out,
+            "{}",
+            line("◆", "gray cloud", " · connected · ctrl-] to detach")
+        )?;
+        out.flush()?;
 
         let _raw = RawMode::enable()?;
         let done = std::sync::Arc::new(AtomicBool::new(false));
@@ -201,7 +297,7 @@ mod attach {
             let done = done.clone();
             std::thread::spawn(move || {
                 let mut last = crossterm::terminal::size().unwrap_or((0, 0));
-                let _ = tx.send(ToVm::Resize(last.0, last.1));
+                repaint(&tx);
                 while !done.load(Ordering::Relaxed) {
                     std::thread::sleep(Duration::from_millis(250));
                     let now = crossterm::terminal::size().unwrap_or((0, 0));
@@ -222,6 +318,7 @@ mod attach {
             std::thread::spawn(move || {
                 let mut after = att.out_seq;
                 let mut was_online = true;
+                let mut repainted = false;
                 let url = crate::account::endpoint("agent/tty/output");
                 while !done.load(Ordering::Relaxed) {
                     let Ok(base) = &url else { break };
@@ -241,33 +338,38 @@ mod attach {
                         }
                     };
                     if payload.supplanted {
-                        let mut out = std::io::stdout();
-                        let _ = out.write_all(
-                            b"\r\n[detached - another client attached to this machine]\r\n",
+                        note(
+                            "◇",
+                            "detached",
+                            " · another client attached to this machine",
                         );
-                        let _ = out.flush();
                         let _ = tx.send(ToVm::Stop);
                         break;
                     }
                     if payload.online != was_online {
                         was_online = payload.online;
-                        let mut out = std::io::stdout();
-                        let note: &[u8] = if was_online {
-                            b"\r\n[machine back online]\r\n"
+                        if was_online {
+                            note("◆", "machine back online", "");
+                            repaint(&tx);
                         } else {
-                            b"\r\n[machine unreachable - retrying...]\r\n"
-                        };
-                        let _ = out.write_all(note);
-                        let _ = out.flush();
+                            note("◇", "machine unreachable", " · retrying…");
+                        }
                     }
                     if payload.reset {
                         let mut out = std::io::stdout();
                         let _ = out.write_all(b"\x1b[2J\x1b[H");
                         let _ = out.flush();
+                        repaint(&tx);
                     }
                     if let Ok(bytes) = B64.decode(&payload.data)
                         && !bytes.is_empty()
                     {
+                        // The first bytes prove the VM is live even when the
+                        // attach-time nudge reached it mid-wake.
+                        if !repainted {
+                            repainted = true;
+                            repaint(&tx);
+                        }
                         let mut out = std::io::stdout();
                         let _ = out.write_all(&bytes);
                         let _ = out.flush();
@@ -306,7 +408,15 @@ mod attach {
         done.store(true, Ordering::Relaxed);
         let _ = post(&http, token, "agent/tty/detach", serde_json::json!({}));
         drop(_raw);
-        writeln!(out, "\r\n[detached — the remote session keeps running]")?;
+        writeln!(
+            out,
+            "\r\n\x1b[J{}",
+            line(
+                "◆",
+                "detached",
+                " · your cloud session keeps running · /cloud to reattach"
+            )
+        )?;
         Ok(())
     }
 }
