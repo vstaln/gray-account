@@ -176,14 +176,16 @@ mod attach {
     ) -> anyhow::Result<()> {
         let url = crate::account::endpoint("agent/tty/input")?;
         let body = serde_json::json!({ "data": data, "iseq": iseq, "attach": attach_id });
-        let send = || {
+        let send = || -> Result<(), Box<ureq::Error>> {
             agent
                 .post(&url)
                 .set("authorization", &format!("Bearer {token}"))
                 .send_json(body.clone())
+                .map(drop)
+                .map_err(Box::new)
         };
         match send() {
-            Err(ureq::Error::Transport(_)) => {
+            Err(e) if matches!(*e, ureq::Error::Transport(_)) => {
                 send().map_err(|e| anyhow::anyhow!("agent/tty/input: {e}"))?;
             }
             Err(e) => return Err(anyhow::anyhow!("agent/tty/input: {e}")),
