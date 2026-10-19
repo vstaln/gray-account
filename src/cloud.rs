@@ -86,15 +86,21 @@ mod attach {
         Stop,
     }
 
-    struct RawMode;
-    impl RawMode {
-        fn enable() -> anyhow::Result<Self> {
+    struct RemoteScreen;
+    impl RemoteScreen {
+        fn enter() -> anyhow::Result<Self> {
             crossterm::terminal::enable_raw_mode()?;
+            let mut out = std::io::stdout();
+            let _ = out.write_all(b"\x1b[?1049h\x1b[H\x1b[2J");
+            let _ = out.flush();
             Ok(Self)
         }
     }
-    impl Drop for RawMode {
+    impl Drop for RemoteScreen {
         fn drop(&mut self) {
+            let mut out = std::io::stdout();
+            let _ = out.write_all(b"\x1b[?1049l\x1b[?25h");
+            let _ = out.flush();
             let _ = crossterm::terminal::disable_raw_mode();
         }
     }
@@ -217,7 +223,7 @@ mod attach {
         )?;
         out.flush()?;
 
-        let _raw = RawMode::enable()?;
+        let _screen = RemoteScreen::enter()?;
         let done = std::sync::Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel::<ToVm>();
 
@@ -363,7 +369,7 @@ mod attach {
 
         done.store(true, Ordering::Relaxed);
         let _ = post(&http, token, "agent/tty/detach", serde_json::json!({}));
-        drop(_raw);
+        drop(_screen);
         writeln!(
             out,
             "\r\n\x1b[J{}",
@@ -387,7 +393,7 @@ commands:
   connect [code]   pair this terminal with a one-time code from the account page
   status           provision if needed and print the machine's state
   logout           revoke the stored token and forget the pairing
-  <message>        one-shot chat with your machine (first call provisions it)
+  <message>        one-shot chat with your machine (first call provisions it)\n  new <message>    same, but starts a fresh session — forgets prior context
 
 detaching: Ctrl-] leaves the remote session running";
 
@@ -501,22 +507,77 @@ async fn connect(code: Option<&str>, interactive: bool) -> anyhow::Result<String
     Ok(format!("connected as {}\n{status}", acct.label()))
 }
 
-async fn chat(words: &[String], interactive: bool) -> anyhow::Result<String> {
+/// Live "thinking" line on stderr while the model round-trips — pure
+/// perception work: the request itself doesn't change, but a moving counter
+/// makes a 3–10s turn feel attended instead of hung. Clears itself on exit.
+fn thinking_guard(interactive: bool) -> Option<tokio::task::JoinHandle<()>> {
+    use std::io::Write;
+    if !interactive || !std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+        return None;
+    }
+    Some(tokio::spawn(async move {
+        let t0 = std::time::Instant::now();
+        loop {
+            let e = t0.elapsed().as_secs();
+            let _ = write!(std::io::stderr(), "\r\x1b[2K · thinking {e}s");
+            let _ = std::io::stderr().flush();
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }))
+}
+
+fn drop_guard(g: Option<tokio::task::JoinHandle<()>>) {
+    use std::io::Write;
+    if let Some(h) = g {
+        h.abort();
+        let _ = write!(std::io::stderr(), "\r\x1b[2K");
+        let _ = std::io::stderr().flush();
+    }
+}
+
+/// Raw chat POST that keeps the status code, so the caller can provision on
+/// first use instead of paying a round trip on every message.
+async fn post_chat(
+    client: &reqwest::Client,
+    token: &str,
+    message: &str,
+    fresh: bool,
+) -> anyhow::Result<ChatOut> {
+    let url = account::endpoint("agent/chat")?;
+    let send = || {
+        client
+            .post(&url)
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "message": message, "fresh": fresh }))
+            .send()
+    };
+    let mut resp = send()
+        .await
+        .map_err(|e| anyhow::anyhow!("could not reach {url}: {e}"))?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        // No seat row yet — provision, then resend once.
+        provision(client, token).await?;
+        resp = send()
+            .await
+            .map_err(|e| anyhow::anyhow!("could not reach {url}: {e}"))?;
+    }
+    if !resp.status().is_success() {
+        anyhow::bail!(account::error_message(resp).await);
+    }
+    Ok(resp.json().await?)
+}
+
+async fn chat(words: &[String], fresh: bool, interactive: bool) -> anyhow::Result<String> {
     let client = http_client()?;
     let token = require_token(interactive).await?;
     let message = words.join(" ");
     if message.trim().is_empty() {
         return status_text(&client, &token).await;
     }
-    provision(&client, &token).await?;
-    let out: ChatOut = post(
-        &client,
-        &token,
-        "agent/chat",
-        &serde_json::json!({ "message": message }),
-    )
-    .await?;
-    Ok(out.response.trim_end().to_string())
+    let guard = thinking_guard(interactive);
+    let out = post_chat(&client, &token, &message, fresh).await;
+    drop_guard(guard);
+    Ok(out?.response.trim_end().to_string())
 }
 
 /// `gray cloud …` entry point: subcommand dispatch plus the chat fallback,
@@ -543,6 +604,7 @@ pub async fn run(args: &[String], interactive: bool) -> anyhow::Result<String> {
         Some("-h" | "--help" | "help") => Ok(USAGE.to_string()),
         Some("connect") => connect(args.get(1).map(String::as_str), interactive).await,
         Some("logout") => account::logout().await,
-        Some(_) => chat(args, interactive).await,
+        Some("new") => chat(&args[1..], true, interactive).await,
+        Some(_) => chat(args, false, interactive).await,
     }
 }
