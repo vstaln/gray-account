@@ -37,53 +37,7 @@ mod attach {
     const B64: base64::engine::general_purpose::GeneralPurpose =
         base64::engine::general_purpose::STANDARD;
 
-    /// gray's working shimmer: a bright band sweeps across the label every
-    /// 2s — the same curve and colors the composer paints `⬡ Working…` with.
-    fn shimmer(text: &str, elapsed: Duration) -> String {
-        if std::env::var_os("NO_COLOR").is_some() {
-            return text.to_string();
-        }
-        let chars: Vec<char> = text.chars().collect();
-        let padding = 10usize;
-        let period = chars.len() + padding * 2;
-        let pos = ((elapsed.as_secs_f32() % 2.0) / 2.0 * period as f32) as usize;
-        let (base, hilite) = ([150.0f32, 148.0, 144.0], [240.0f32, 240.0, 240.0]);
-        let mut out = String::new();
-        for (i, ch) in chars.iter().enumerate() {
-            let dist = ((i + padding) as f32 - pos as f32).abs();
-            let t = if dist <= 5.0 {
-                0.5 * (1.0 + (std::f32::consts::PI * (dist / 5.0)).cos())
-            } else {
-                0.0
-            };
-            let k = t.clamp(0.0, 1.0) * 0.9;
-            let c: Vec<u8> = (0..3)
-                .map(|j| (base[j] + (hilite[j] - base[j]) * k).round() as u8)
-                .collect();
-            let bold = if t > 0.3 { "\x1b[1m" } else { "" };
-            out.push_str(&format!(
-                "\x1b[38;2;{};{};{}m{bold}{ch}\x1b[0m",
-                c[0], c[1], c[2]
-            ));
-        }
-        out
-    }
-
-    fn dim(text: &str) -> String {
-        if std::env::var_os("NO_COLOR").is_some() {
-            return text.to_string();
-        }
-        format!("\x1b[2m{text}\x1b[0m")
-    }
-
-    /// One status line in gray's accent: a mark, a bold head, a dim tail.
-    /// NO_COLOR keeps the words and drops the paint.
-    fn line(mark: &str, head: &str, tail: &str) -> String {
-        if std::env::var_os("NO_COLOR").is_some() {
-            return format!("{mark} {head}{tail}");
-        }
-        format!("\x1b[38;2;246;173;126m{mark}\x1b[0m \x1b[1m{head}\x1b[0m\x1b[2m{tail}\x1b[0m")
-    }
+    use crate::ui::{dim, line, shimmer_ansi as shimmer};
 
     /// Nudge the remote pty one row short and back: two SIGWINCHes make the
     /// remote gray repaint its whole screen, since attach only streams new

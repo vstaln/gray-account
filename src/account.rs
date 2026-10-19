@@ -92,7 +92,7 @@ impl std::fmt::Debug for StoredToken {
 
 /// The gray state directory: `GRAY_HOME` when set and non-blank, else the
 /// user profile plus `.gray`.
-fn gray_home() -> anyhow::Result<PathBuf> {
+pub(crate) fn gray_home() -> anyhow::Result<PathBuf> {
     gray_home_opt().ok_or_else(|| {
         anyhow::anyhow!("cannot resolve home: set GRAY_HOME or the platform user profile")
     })

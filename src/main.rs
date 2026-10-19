@@ -6,7 +6,7 @@
 
 use std::io::{IsTerminal, Write as _};
 
-use gray_account::{Reply, account, cloud, maker, manifest, publish};
+use gray_account::{Reply, account, cloud, maker, manifest, marketplace, publish};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -65,6 +65,18 @@ async fn main() -> anyhow::Result<()> {
         Some("whoami") => run(account::whoami().await),
         Some("logout") => run(account::logout().await),
         Some("cloud") => run(cloud::run(&args[1..], std::io::stdin().is_terminal()).await),
+        Some("marketplace") => {
+            let args = &args[1..];
+            if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+                let text = marketplace::run(args).await?;
+                if !text.is_empty() {
+                    println!("{text}");
+                }
+                Ok(())
+            } else {
+                run(marketplace::summary(&args.join(" ")).await)
+            }
+        }
         Some("new" | "check" | "build" | "release") => {
             let cwd = std::env::current_dir()?;
             run(maker::dispatch(&args, &cwd))

@@ -10,7 +10,9 @@ pub mod account;
 pub mod cloud;
 pub mod maker;
 pub mod manifest;
+pub mod marketplace;
 pub mod publish;
+pub mod ui;
 
 use serde_json::Value;
 use serde_json::json;
@@ -71,16 +73,15 @@ async fn command_run(params: &Value) -> Value {
         }
         "/whoami" => render(account::whoami().await, "whoami"),
         "/logout" => render(account::logout().await, "logout"),
+        "/marketplace" => {
+            let argv = argv_of(params);
+            let text = marketplace::summary(&argv.join(" "))
+                .await
+                .unwrap_or_else(|e| format!("marketplace unavailable: {e:#}"));
+            return marketplace_reply(argv, text);
+        }
         "/cloud" => {
-            let argv: Vec<String> = params
-                .get("argv")
-                .and_then(Value::as_array)
-                .map(|argv| {
-                    argv.iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default();
+            let argv = argv_of(params);
             if matches!(argv.first().map(String::as_str), None | Some("attach")) {
                 return match cloud::run(&argv, false).await {
                     Ok(text) => json!({ "terminal": ["cloud", "attach"], "text": text }),
@@ -92,6 +93,26 @@ async fn command_run(params: &Value) -> Value {
         _ => String::new(),
     };
     json!({ "text": text })
+}
+
+fn argv_of(params: &Value) -> Vec<String> {
+    params
+        .get("argv")
+        .and_then(Value::as_array)
+        .map(|argv| {
+            argv.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `/marketplace [query]` hands the terminal to `gray-account marketplace`;
+/// `text` is what a host without a tty shows instead.
+fn marketplace_reply(argv: Vec<String>, text: String) -> Value {
+    let mut terminal = vec!["marketplace".to_string()];
+    terminal.extend(argv);
+    json!({ "terminal": terminal, "text": text })
 }
 
 fn render(result: anyhow::Result<String>, verb: &str) -> String {
@@ -113,15 +134,43 @@ mod tests {
         assert_eq!(m["version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(
             m["commands"],
-            json!(["/login", "/whoami", "/logout", "/maker", "/cloud"])
+            json!([
+                "/login",
+                "/whoami",
+                "/logout",
+                "/maker",
+                "/cloud",
+                "/marketplace"
+            ])
         );
         assert_eq!(
             m["completion"],
             json!([
-                "login", "whoami", "logout", "cloud", "new", "check", "build", "release", "publish"
+                "login",
+                "whoami",
+                "logout",
+                "cloud",
+                "marketplace",
+                "new",
+                "check",
+                "build",
+                "release",
+                "publish"
             ])
         );
         assert_eq!(m["tools"], json!([]));
+    }
+
+    #[test]
+    fn marketplace_hands_over_the_terminal_with_the_query() {
+        assert_eq!(
+            marketplace_reply(vec!["file".into(), "search".into()], "fallback".into()),
+            json!({"terminal": ["marketplace", "file", "search"], "text": "fallback"})
+        );
+        assert_eq!(
+            marketplace_reply(Vec::new(), "t".into())["terminal"],
+            json!(["marketplace"])
+        );
     }
 
     #[tokio::test]

@@ -12,9 +12,9 @@ pub fn manifest() -> serde_json::Value {
         "version": env!("CARGO_PKG_VERSION"),
         "protocol": "1.1",
         "tools": [],
-        "commands": ["/login", "/whoami", "/logout", "/maker", "/cloud"],
+        "commands": ["/login", "/whoami", "/logout", "/maker", "/cloud", "/marketplace"],
         "completion": [
-            "login", "whoami", "logout", "cloud", "new", "check", "build", "release", "publish",
+            "login", "whoami", "logout", "cloud", "marketplace", "new", "check", "build", "release", "publish",
         ],
     })
 }
