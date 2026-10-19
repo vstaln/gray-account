@@ -398,7 +398,7 @@ mod chat {
     use std::time::{Duration, Instant};
 
     use super::ChatOut;
-    use super::attach::{self, RemoteScreen};
+    use super::attach;
     use crate::ui::{dim, line};
 
     /// Local escapes: Ctrl-] detaches; Ctrl-D/Ctrl-C do too — muscle
@@ -700,12 +700,24 @@ mod chat {
 
     /// `gray cloud` / `gray cloud attach`: connect banner immediately,
     /// machine-online wait, then the local chat loop.
+    /// Raw mode without the alternate screen: the chat loop writes plain
+    /// scroll text under the surrendered gray band, so the session reads
+    /// like transcript — not a screen takeover. Drop restores cooked mode.
+    struct RawMode;
+    impl Drop for RawMode {
+        fn drop(&mut self) {
+            let _ = crossterm::terminal::disable_raw_mode();
+        }
+    }
+
     pub fn run(token: &str) -> anyhow::Result<()> {
         let http = attach::agent();
-        let screen = RemoteScreen::enter()?;
+        crossterm::terminal::enable_raw_mode()?;
+        let _raw = RawMode;
         let mut out = std::io::stdout();
         write!(out, "{}\r\n", line("◆", "gray cloud", " · connecting…"))?;
         out.flush()?;
+        attach::post(&http, token, "agent/provision", serde_json::json!({}))?;
 
         let stop = Arc::new(AtomicBool::new(false));
         let ticker = {
@@ -766,7 +778,7 @@ mod chat {
             loop_io(&rx, &mut out, send)?;
         }
 
-        drop(screen);
+        drop(_raw);
         writeln!(
             out,
             "\r\n\x1b[J{}",
