@@ -51,6 +51,25 @@ pub trait Machine: Send + Sync + 'static {
     fn nudge(&self) -> impl Future<Output = ()> + Send;
     fn chat(&self, message: &str, fresh: bool)
     -> impl Future<Output = Result<String, Fail>> + Send;
+    /// The machine's short id once the registry has named it.
+    fn short_id(&self) -> Option<String> {
+        None
+    }
+}
+
+/// "your machine" or "your machine (08947c5f)" once the id is known.
+fn who<M: Machine>(machine: &M) -> String {
+    match machine.short_id() {
+        Some(id) => format!("your machine ({id})"),
+        None => "your machine".into(),
+    }
+}
+
+/// The registry host a cloud session talks to, e.g. `gray.alignment.id`.
+fn cloud_host() -> String {
+    let base = account::base_url();
+    let rest = base.split_once("://").map_or(base.as_str(), |(_, r)| r);
+    rest.split('/').next().unwrap_or(rest).to_string()
 }
 
 /// What the worker hands to the transcript. Live: `host/say` frames.
@@ -142,7 +161,7 @@ fn turn_on<M: Machine, S: Say>(sid: &str, machine: M, say: S, first: Option<Job>
         }
         return match (online, queued) {
             (_, true) => String::new(),
-            (true, false) => "◆ cloud mode is on — messages go to your machine · /cloud off returns".into(),
+            (true, false) => format!("◆ cloud mode is on — messages go to your machine on {} · /cloud off returns", cloud_host()),
             (false, false) => "◆ still waking your machine — type away, messages queue".into(),
         };
     }
@@ -160,7 +179,7 @@ fn turn_on<M: Machine, S: Say>(sid: &str, machine: M, say: S, first: Option<Job>
     });
     drop(guard);
     tokio::spawn(worker(machine, say, rx, generation, online));
-    "◆ cloud mode — your messages go to your machine · /cloud off returns to local".into()
+    format!("◆ cloud mode — messages go to your machine on {} · /cloud off returns to local", cloud_host())
 }
 
 fn turn_off() -> String {
@@ -236,10 +255,10 @@ async fn wake<M: Machine>(
         Err(_) => phase_of(first.as_deref()),
     };
     if phase == Phase::Online {
-        speak("◆ your machine is online");
+        speak(&format!("◆ {} is online", who(machine)));
         return Ok(());
     }
-    speak(&format!("◆ your machine · {}", phase.doing()));
+    speak(&format!("◆ {} · {}", who(machine), phase.doing()));
     machine.nudge().await;
     let start = Instant::now();
     let mut next_note = NOTE_EVERY;
@@ -255,7 +274,7 @@ async fn wake<M: Machine>(
         };
         let secs = start.elapsed().as_secs();
         if now == Phase::Online {
-            speak(&format!("◆ your machine is online · woke in {secs}s"));
+            speak(&format!("◆ {} is online · woke in {secs}s", who(machine)));
             return Ok(());
         }
         if now != phase {
@@ -377,6 +396,7 @@ impl Say for HostSay {
 pub struct Live {
     token: String,
     client: reqwest::Client,
+    agent_id: std::sync::Mutex<Option<String>>,
 }
 
 impl Live {
@@ -386,7 +406,7 @@ impl Live {
             .timeout(CHAT_TIMEOUT)
             .build()
             .unwrap_or_default();
-        Self { token, client }
+        Self { token, client, agent_id: Default::default() }
     }
 
     async fn call(&self, get: bool, path: &str, body: Value) -> Result<Value, Fail> {
@@ -403,10 +423,15 @@ impl Live {
             .map_err(|e| Fail::Retry(format!("could not reach the registry: {e}")))?;
         let code = resp.status().as_u16();
         if resp.status().is_success() {
-            return resp
+            let v: Value = resp
                 .json()
                 .await
-                .map_err(|e| Fail::Retry(format!("bad reply: {e}")));
+                .map_err(|e| Fail::Retry(format!("bad reply: {e}")))?;
+            if let Some(id) = v.get("agent_id").and_then(Value::as_str) {
+                *self.agent_id.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some(id.chars().take(8).collect());
+            }
+            return Ok(v);
         }
         let msg = account::error_message(resp).await;
         Err(match code {
@@ -451,6 +476,10 @@ impl Machine for Live {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string())
+    }
+
+    fn short_id(&self) -> Option<String> {
+        self.agent_id.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 }
 
