@@ -6,7 +6,7 @@
 
 use std::io::IsTerminal;
 
-use gray_account::{Reply, account, cloud, maker, manifest, marketplace, publish};
+use gray_account::{Reply, account, accounts, cloud, maker, manifest, marketplace, publish};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -65,6 +65,7 @@ async fn main() -> anyhow::Result<()> {
         Some("whoami") => run(account::whoami().await),
         Some("logout") => run(account::logout().await),
         Some("cloud") => run(cloud::run(&args[1..], std::io::stdin().is_terminal()).await),
+        Some("accounts") => run(accounts::run().map(|()| String::new())),
         Some("marketplace") => {
             let args = &args[1..];
             if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
