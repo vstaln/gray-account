@@ -15,6 +15,7 @@ pub mod marketplace;
 pub mod publish;
 pub mod ui;
 pub mod accounts;
+pub mod feedback;
 
 use serde_json::Value;
 use serde_json::json;
@@ -121,6 +122,7 @@ async fn command_run(params: &Value) -> Value {
                 "text": accounts::text(),
             });
         }
+        "/feedback" => return feedback::run(&argv_of(params), &params["session"]),
         _ => String::new(),
     };
     json!({ "text": text })
@@ -171,7 +173,9 @@ mod tests {
                 "/logout",
                 "/maker",
                 "/cloud",
-                "/marketplace"
+                "/marketplace",
+                "/accounts",
+                "/feedback"
             ])
         );
         assert_eq!(
