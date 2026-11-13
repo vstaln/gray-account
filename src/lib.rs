@@ -9,6 +9,7 @@
 pub mod account;
 pub mod cloud;
 pub mod cloud_mode;
+pub mod login_modal;
 pub mod maker;
 pub mod manifest;
 pub mod marketplace;
@@ -93,6 +94,9 @@ async fn command_run(params: &Value) -> Value {
                         .filter_map(Value::as_str)
                         .find(|arg| !arg.trim().is_empty())
                 });
+            if code.and_then(account::normalize_code).is_none() {
+                return json!({ "terminal": ["login"], "text": account::login_walkthrough() });
+            }
             render(account::login(code, false).await, "login")
         }
         "/whoami" => render(account::whoami().await, "whoami"),

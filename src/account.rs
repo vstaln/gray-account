@@ -468,7 +468,7 @@ pub fn prompt_for_code() -> Option<String> {
 
 /// Best-effort browser open for the account page — the printed URL stays
 /// the fallback on headless boxes where no opener exists.
-fn open_in_browser(url: &str) {
+pub(crate) fn open_in_browser(url: &str) {
     use std::process::{Command, Stdio};
     let mut cmd = match std::env::consts::OS {
         "macos" => {
@@ -537,7 +537,11 @@ pub async fn enroll(code: Option<&str>, interactive: bool) -> anyhow::Result<(St
             }
         }
     };
-    let (token, account) = login_with_code(&code).await?;
+    exchange_and_store(&code).await
+}
+
+pub async fn exchange_and_store(code: &str) -> anyhow::Result<(String, Account)> {
+    let (token, account) = login_with_code(code).await?;
     // Persist before revoking. The exchanged token is live server-side the
     // moment it is minted, so the old order (revoke, then save) turned a failed
     // local write into a logged-out machine holding nothing. Now a failed save
@@ -570,12 +574,27 @@ pub async fn enroll(code: Option<&str>, interactive: bool) -> anyhow::Result<(St
 pub async fn login(code: Option<&str>, interactive: bool) -> anyhow::Result<String> {
     if !interactive && code.and_then(normalize_code).is_none() {
         open_in_browser(SITE_ACCOUNT_URL);
-        return Ok(format!(
-            "Log in to gray.alignment.id from this machine.\n\n{}\n\nThen run /login <code>.",
-            login_instructions()
-        ));
+        return Ok(login_walkthrough());
     }
     let (_token, account) = enroll(code, interactive).await?;
+    Ok(login_report(&account))
+}
+
+pub fn login_walkthrough() -> String {
+    format!(
+        "Log in to gray.alignment.id from this machine.\n\n{}\n\nThen run /login <code>.",
+        login_instructions()
+    )
+}
+
+pub async fn login_modal() -> anyhow::Result<String> {
+    Ok(match crate::login_modal::run().await? {
+        Some(account) => login_report(&account),
+        None => "login cancelled".to_string(),
+    })
+}
+
+fn login_report(account: &Account) -> String {
     let mut out = format!("logged in as {}\n", account.label());
     if account.plugins.is_empty() {
         out.push_str("no plugins published yet\n");
@@ -591,7 +610,7 @@ pub async fn login(code: Option<&str>, interactive: bool) -> anyhow::Result<Stri
     out.push_str(
         "\nWhat this unlocks today: nothing you didn't already have. The token only names you on registry calls.",
     );
-    Ok(out.trim_end().to_string())
+    out.trim_end().to_string()
 }
 
 /// `gray account whoami` / `/whoami`: reports the stored token's identity.

@@ -60,6 +60,12 @@ async fn main() -> anyhow::Result<()> {
                 );
                 Ok(())
             }
+            code if account::normalize_code(code.unwrap_or_default()).is_none()
+                && std::io::stdin().is_terminal()
+                && std::io::stdout().is_terminal() =>
+            {
+                run(account::login_modal().await)
+            }
             code => run(account::login(code, true).await),
         },
         Some("whoami") => run(account::whoami().await),
