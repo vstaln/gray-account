@@ -16,7 +16,7 @@ pub fn manifest() -> serde_json::Value {
         // (a no-op `{}` otherwise); replies print via `host/say`.
         "hooks": ["input/submit"],
         "capabilities": ["host.say"],
-        "commands": ["/login", "/whoami", "/logout", "/maker", "/cloud", "/marketplace", "/accounts", "/feedback"],
+        "commands": ["/login", "/whoami", "/logout", "/maker", "/cloud", "/marketplace", "/feedback"],
         "completion": [
             "login", "whoami", "logout", "cloud", "marketplace", "new", "check", "build", "release", "publish",
         ],

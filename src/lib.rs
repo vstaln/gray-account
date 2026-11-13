@@ -14,7 +14,6 @@ pub mod manifest;
 pub mod marketplace;
 pub mod publish;
 pub mod ui;
-pub mod accounts;
 pub mod feedback;
 
 use serde_json::Value;
@@ -116,12 +115,6 @@ async fn command_run(params: &Value) -> Value {
             }
             render(cloud::run(&argv, false).await, "cloud")
         }
-        "/accounts" => {
-            return json!({
-                "terminal": ["accounts"],
-                "text": accounts::text(),
-            });
-        }
         "/feedback" => return feedback::run(&argv_of(params), &params["session"]),
         _ => String::new(),
     };
@@ -174,7 +167,6 @@ mod tests {
                 "/maker",
                 "/cloud",
                 "/marketplace",
-                "/accounts",
                 "/feedback"
             ])
         );
