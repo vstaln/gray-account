@@ -9,13 +9,13 @@
 pub mod account;
 pub mod cloud;
 pub mod cloud_mode;
+pub mod feedback;
 pub mod login_modal;
 pub mod maker;
 pub mod manifest;
 pub mod marketplace;
 pub mod publish;
 pub mod ui;
-pub mod feedback;
 
 use serde_json::Value;
 use serde_json::json;

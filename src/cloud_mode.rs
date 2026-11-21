@@ -117,7 +117,10 @@ pub fn is_on() -> bool {
 
 /// The `input/submit` hook. Fast path when cloud mode is off: `{}` (pass).
 pub fn input_submit(params: &Value, say: &dyn Say) -> Value {
-    let text = params.get("text").and_then(Value::as_str).unwrap_or_default();
+    let text = params
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let sid = params
         .pointer("/session/id")
         .and_then(Value::as_str)
@@ -161,7 +164,10 @@ fn turn_on<M: Machine, S: Say>(sid: &str, machine: M, say: S, first: Option<Job>
         }
         return match (online, queued) {
             (_, true) => String::new(),
-            (true, false) => format!("◆ cloud mode is on — messages go to your machine on {} · /cloud off returns", cloud_host()),
+            (true, false) => format!(
+                "◆ cloud mode is on — messages go to your machine on {} · /cloud off returns",
+                cloud_host()
+            ),
             (false, false) => "◆ still waking your machine — type away, messages queue".into(),
         };
     }
@@ -179,7 +185,10 @@ fn turn_on<M: Machine, S: Say>(sid: &str, machine: M, say: S, first: Option<Job>
     });
     drop(guard);
     tokio::spawn(worker(machine, say, rx, generation, online));
-    format!("◆ cloud mode — messages go to your machine on {} · /cloud off returns to local", cloud_host())
+    format!(
+        "◆ cloud mode — messages go to your machine on {} · /cloud off returns to local",
+        cloud_host()
+    )
 }
 
 fn turn_off() -> String {
@@ -351,16 +360,25 @@ pub fn slash(argv: &[String], sid: &str) -> Option<Value> {
     let verb = argv
         .first()
         .map(|s| s.strip_prefix('/').unwrap_or(s).to_string());
-    let rest = || argv.get(1..).unwrap_or_default().join(" ").trim().to_string();
+    let rest = || {
+        argv.get(1..)
+            .unwrap_or_default()
+            .join(" ")
+            .trim()
+            .to_string()
+    };
     let live = || {
         let token = account::load_token();
         token.map(|t| (Live::new(t), HostSay))
     };
-    const NO_LOGIN: &str = "not logged in — run /login <code> first (codes at https://gray.alignment.id/account)";
+    const NO_LOGIN: &str =
+        "not logged in — run /login <code> first (codes at https://gray.alignment.id/account)";
     let text = match verb.as_deref() {
         Some("off" | "stop" | "local" | "exit" | "detach") => turn_off(),
         Some("tty") => {
-            return Some(json!({ "terminal": ["cloud", "tty"], "text": "/cloud tty needs an interactive terminal" }));
+            return Some(
+                json!({ "terminal": ["cloud", "tty"], "text": "/cloud tty needs an interactive terminal" }),
+            );
         }
         Some("status" | "connect" | "logout" | "help" | "-h" | "--help") => return None,
         None | Some("on" | "attach") => match live() {
@@ -370,7 +388,12 @@ pub fn slash(argv: &[String], sid: &str) -> Option<Value> {
         Some("new") => match live() {
             Some((m, s)) => {
                 let msg = rest();
-                turn_on(sid, m, s, Some(Job::Fresh((!msg.is_empty()).then_some(msg))))
+                turn_on(
+                    sid,
+                    m,
+                    s,
+                    Some(Job::Fresh((!msg.is_empty()).then_some(msg))),
+                )
             }
             None => NO_LOGIN.into(),
         },
@@ -406,7 +429,11 @@ impl Live {
             .timeout(CHAT_TIMEOUT)
             .build()
             .unwrap_or_default();
-        Self { token, client, agent_id: Default::default() }
+        Self {
+            token,
+            client,
+            agent_id: Default::default(),
+        }
     }
 
     async fn call(&self, get: bool, path: &str, body: Value) -> Result<Value, Fail> {
@@ -470,7 +497,11 @@ impl Machine for Live {
 
     async fn chat(&self, message: &str, fresh: bool) -> Result<String, Fail> {
         let v = self
-            .call(false, "agent/chat", json!({ "message": message, "fresh": fresh }))
+            .call(
+                false,
+                "agent/chat",
+                json!({ "message": message, "fresh": fresh }),
+            )
             .await?;
         Ok(v.get("response")
             .and_then(Value::as_str)
@@ -479,7 +510,10 @@ impl Machine for Live {
     }
 
     fn short_id(&self) -> Option<String> {
-        self.agent_id.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.agent_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 

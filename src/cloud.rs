@@ -194,10 +194,7 @@ mod attach {
                     let _ = write!(out, "\x1b[?25l");
                     while !stop.load(Ordering::Relaxed) {
                         let elapsed = start.elapsed();
-                        let tail = format!(
-                            " {}s",
-                            elapsed.as_secs()
-                        );
+                        let tail = format!(" {}s", elapsed.as_secs());
                         let _ = write!(
                             out,
                             "\r\x1b[2K{}{}",
@@ -463,11 +460,17 @@ pub(crate) async fn post<T: for<'de> Deserialize<'de>>(
     Ok(resp.json().await?)
 }
 
-pub(crate) async fn provision(client: &reqwest::Client, token: &str) -> anyhow::Result<ProvisionOut> {
+pub(crate) async fn provision(
+    client: &reqwest::Client,
+    token: &str,
+) -> anyhow::Result<ProvisionOut> {
     post(client, token, "agent/provision", &serde_json::json!({})).await
 }
 
-pub(crate) async fn fetch_status(client: &reqwest::Client, token: &str) -> anyhow::Result<StatusOut> {
+pub(crate) async fn fetch_status(
+    client: &reqwest::Client,
+    token: &str,
+) -> anyhow::Result<StatusOut> {
     let url = account::endpoint("agent/status")?;
     let resp = client
         .get(&url)

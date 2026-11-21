@@ -90,8 +90,7 @@ fn redact_patterns(text: &str) -> String {
         let tail = &word[w.len()..];
         let scrub = (w.len() > 24 && (w.starts_with("sk-") || w.starts_with("sk_")))
             || (w.len() > 40 && w.starts_with("Bearer "))
-            || (w.len() > 40
-                && (w.starts_with("eyJ") || w.starts_with("AIza")))
+            || (w.len() > 40 && (w.starts_with("eyJ") || w.starts_with("AIza")))
             || w.split_once('=').is_some_and(|(k, v)| {
                 (k.to_ascii_uppercase().contains("KEY")
                     || k.to_ascii_uppercase().contains("TOKEN")

@@ -39,7 +39,11 @@ impl Machine for Script {
     async fn status(&self) -> Result<Option<String>, Fail> {
         let mut q = self.statuses.lock().unwrap();
         // The last scripted status sticks.
-        if q.len() > 1 { q.pop_front().unwrap() } else { q.front().cloned().unwrap_or(Ok(None)) }
+        if q.len() > 1 {
+            q.pop_front().unwrap()
+        } else {
+            q.front().cloned().unwrap_or(Ok(None))
+        }
     }
     async fn nudge(&self) {
         *self.nudges.lock().unwrap() += 1;
@@ -73,7 +77,10 @@ impl Lines {
 }
 
 fn submit(sid: &str, text: &str, say: &Lines) -> Value {
-    input_submit(&json!({ "text": text, "session": { "id": sid, "cwd": "/" } }), say)
+    input_submit(
+        &json!({ "text": text, "session": { "id": sid, "cwd": "/" } }),
+        say,
+    )
 }
 
 /// Let the worker run until it is idle (paused clock auto-advances).
@@ -103,10 +110,17 @@ async fn online_machine_takes_messages_and_replies_land_in_the_transcript() {
     settle().await;
     assert_eq!(say.all(), vec!["◆ your machine is online"]);
 
-    assert_eq!(submit("s1", "  what's up  ", &say), json!({ "handled": true }));
+    assert_eq!(
+        submit("s1", "  what's up  ", &say),
+        json!({ "handled": true })
+    );
     settle().await;
     assert_eq!(m.sent(), vec![("what's up".to_string(), false)]);
-    assert!(say.joined().ends_with("◆ echo: what's up"), "{}", say.joined());
+    assert!(
+        say.joined().ends_with("◆ echo: what's up"),
+        "{}",
+        say.joined()
+    );
     assert_eq!(*m.nudges.lock().unwrap(), 0, "no wake needed when online");
 
     assert!(turn_off().contains("back to local"));
@@ -126,8 +140,15 @@ async fn asleep_machine_narrates_the_wake_and_flushes_the_queue() {
     settle().await;
     let all = say.all();
     assert_eq!(all[0], "◆ your machine · waking from sleep — usually ~25s");
-    assert!(all.contains(&"· queued — sends once your machine is up".to_string()), "{all:?}");
-    assert!(all.iter().any(|l| l.starts_with("◆ your machine is online · woke in ")), "{all:?}");
+    assert!(
+        all.contains(&"· queued — sends once your machine is up".to_string()),
+        "{all:?}"
+    );
+    assert!(
+        all.iter()
+            .any(|l| l.starts_with("◆ your machine is online · woke in ")),
+        "{all:?}"
+    );
     assert!(!all.iter().any(|l| l.contains("first boot")), "{all:?}");
     assert_eq!(*m.nudges.lock().unwrap(), 1);
     assert_eq!(m.sent(), vec![("first".to_string(), false)]);
@@ -145,7 +166,12 @@ async fn still_starting_503s_retry_then_deliver() {
         Ok("finally".into()),
     ]);
     let say = Lines::default();
-    turn_on("s1", m.clone(), say.clone(), Some(Job::Message("hi".into())));
+    turn_on(
+        "s1",
+        m.clone(),
+        say.clone(),
+        Some(Job::Message("hi".into())),
+    );
     settle().await;
     assert_eq!(m.sent().len(), 3);
     assert_eq!(say.all().last().unwrap(), "◆ finally");
@@ -162,7 +188,10 @@ async fn fatal_chat_error_leaves_cloud_mode() {
     let say = Lines::default();
     turn_on("s1", m, say.clone(), Some(Job::Message("hi".into())));
     settle().await;
-    assert_eq!(say.all().last().unwrap(), "◇ Seat suspended. — cloud mode off");
+    assert_eq!(
+        say.all().last().unwrap(),
+        "◇ Seat suspended. — cloud mode off"
+    );
     assert!(!is_on());
 }
 
@@ -177,10 +206,21 @@ async fn wake_that_never_finishes_gives_up_and_turns_off() {
         settle().await;
     }
     let all = say.all();
-    assert_eq!(all[0], "◆ your machine · first boot — setting up, a minute or two");
-    assert!(all.iter().any(|l| l.starts_with("· still waking · 3")), "{all:?}");
+    assert_eq!(
+        all[0],
+        "◆ your machine · first boot — setting up, a minute or two"
+    );
+    assert!(
+        all.iter().any(|l| l.starts_with("· still waking · 3")),
+        "{all:?}"
+    );
     assert!(all.last().unwrap().contains("didn't come up"), "{all:?}");
-    assert!(all.last().unwrap().ends_with("cloud mode off, /cloud to retry"), "{all:?}");
+    assert!(
+        all.last()
+            .unwrap()
+            .ends_with("cloud mode off, /cloud to retry"),
+        "{all:?}"
+    );
     assert!(!is_on());
 }
 
@@ -189,7 +229,12 @@ async fn another_session_is_local_and_drops_the_mode() {
     let _g = SERIAL.lock().await;
     *mode() = None;
     let say = Lines::default();
-    turn_on("s1", Script::default().statuses(&["active"]), say.clone(), None);
+    turn_on(
+        "s1",
+        Script::default().statuses(&["active"]),
+        say.clone(),
+        None,
+    );
     assert_eq!(submit("s2", "elsewhere", &say), json!({}));
     assert!(!is_on());
 }
@@ -218,8 +263,16 @@ async fn new_rotates_the_conversation() {
     turn_on("s1", m.clone(), say.clone(), Some(Job::Fresh(None)));
     settle().await;
     assert_eq!(m.sent(), vec![(String::new(), true)]);
-    assert_eq!(say.all().last().unwrap(), "◆ new conversation on your machine");
-    turn_on("s1", m.clone(), say.clone(), Some(Job::Fresh(Some("start over".into()))));
+    assert_eq!(
+        say.all().last().unwrap(),
+        "◆ new conversation on your machine"
+    );
+    turn_on(
+        "s1",
+        m.clone(),
+        say.clone(),
+        Some(Job::Fresh(Some("start over".into()))),
+    );
     settle().await;
     assert_eq!(m.sent()[1], ("start over".to_string(), true));
     turn_off();
