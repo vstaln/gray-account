@@ -12,7 +12,11 @@ pub fn manifest() -> serde_json::Value {
         "version": env!("CARGO_PKG_VERSION"),
         "protocol": "1.1",
         "tools": [],
-        "commands": ["/login", "/whoami", "/logout", "/maker", "/cloud", "/marketplace"],
+        // `/cloud` mode: the hook claims submitted messages while it's on
+        // (a no-op `{}` otherwise); replies print via `host/say`.
+        "hooks": ["input/submit"],
+        "capabilities": ["host.say"],
+        "commands": ["/login", "/whoami", "/logout", "/maker", "/cloud", "/marketplace", "/feedback"],
         "completion": [
             "login", "whoami", "logout", "cloud", "marketplace", "new", "check", "build", "release", "publish",
         ],

@@ -86,26 +86,32 @@ mod attach {
         Stop,
     }
 
-    struct RawMode;
-    impl RawMode {
-        fn enable() -> anyhow::Result<Self> {
+    pub(super) struct RemoteScreen;
+    impl RemoteScreen {
+        pub(super) fn enter() -> anyhow::Result<Self> {
             crossterm::terminal::enable_raw_mode()?;
+            let mut out = std::io::stdout();
+            let _ = out.write_all(b"\x1b[?1049h\x1b[H\x1b[2J");
+            let _ = out.flush();
             Ok(Self)
         }
     }
-    impl Drop for RawMode {
+    impl Drop for RemoteScreen {
         fn drop(&mut self) {
+            let mut out = std::io::stdout();
+            let _ = out.write_all(b"\x1b[?1049l\x1b[?25h");
+            let _ = out.flush();
             let _ = crossterm::terminal::disable_raw_mode();
         }
     }
 
-    fn agent() -> ureq::Agent {
+    pub(super) fn agent() -> ureq::Agent {
         ureq::AgentBuilder::new()
             .timeout_connect(Duration::from_secs(10))
             .build()
     }
 
-    fn post(
+    pub(super) fn post(
         agent: &ureq::Agent,
         token: &str,
         path: &str,
@@ -148,7 +154,7 @@ mod attach {
         Ok(())
     }
 
-    fn wait_online(http: &ureq::Agent, token: &str) -> anyhow::Result<()> {
+    pub(super) fn wait_online(http: &ureq::Agent, token: &str) -> anyhow::Result<()> {
         let base = crate::account::endpoint("agent/tty/status")?;
         let deadline = Instant::now() + Duration::from_secs(150);
         while Instant::now() < deadline {
@@ -188,14 +194,11 @@ mod attach {
                     let _ = write!(out, "\x1b[?25l");
                     while !stop.load(Ordering::Relaxed) {
                         let elapsed = start.elapsed();
-                        let tail = format!(
-                            " {}s · first boot takes a couple of minutes",
-                            elapsed.as_secs()
-                        );
+                        let tail = format!(" {}s", elapsed.as_secs());
                         let _ = write!(
                             out,
                             "\r\x1b[2K{}{}",
-                            shimmer(" ⬡ waking your Gray machine…", elapsed),
+                            shimmer(" ⬡ waking your machine…", elapsed),
                             dim(&tail)
                         );
                         let _ = out.flush();
@@ -213,11 +216,11 @@ mod attach {
         writeln!(
             out,
             "{}",
-            line("◆", "gray cloud", " · connected · ctrl-] to detach")
+            line("◆", "your machine", " · connected · ctrl-] to detach")
         )?;
         out.flush()?;
 
-        let _raw = RawMode::enable()?;
+        let _screen = RemoteScreen::enter()?;
         let done = std::sync::Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel::<ToVm>();
 
@@ -363,7 +366,7 @@ mod attach {
 
         done.store(true, Ordering::Relaxed);
         let _ = post(&http, token, "agent/tty/detach", serde_json::json!({}));
-        drop(_raw);
+        drop(_screen);
         writeln!(
             out,
             "\r\n\x1b[J{}",
@@ -379,43 +382,47 @@ mod attach {
 
 const USAGE: &str = "gray cloud — your hosted Gray machine
 
-usage: gray cloud [command] [args]
+inside gray (the usual way):
+  /cloud              route this session's messages to your machine
+  /cloud <message>    same, and send <message> right away
+  /cloud off          back to the local model
+  /cloud new          start a fresh conversation on the machine
+  /cloud status       the machine's state
+  /cloud tty          take over the terminal with the machine's own screen
 
-commands:
-  (no args)        attach to the live remote session — same UI, remote brain
-  attach           same as bare `gray cloud`
-  connect [code]   pair this terminal with a one-time code from the account page
-  status           provision if needed and print the machine's state
-  logout           revoke the stored token and forget the pairing
-  <message>        one-shot chat with your machine (first call provisions it)
-
-detaching: Ctrl-] leaves the remote session running";
+from a shell:
+  gray cloud                 the machine's state
+  gray cloud <message>       one-shot message, prints the reply
+  gray cloud new [message]   same, in a fresh conversation
+  gray cloud tty             raw attach to the remote screen (Ctrl-] detaches)
+  gray cloud connect [code]  pair this terminal with a code from the account page
+  gray cloud logout          revoke the stored token";
 
 #[derive(Debug, Default, Deserialize)]
-struct StatusOut {
+pub(crate) struct StatusOut {
     #[serde(default)]
-    status: Option<String>,
+    pub(crate) status: Option<String>,
     #[serde(default)]
-    suspended: bool,
+    pub(crate) suspended: bool,
     #[serde(default)]
-    agent_id: Option<String>,
+    pub(crate) agent_id: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
-struct ProvisionOut {
+pub(crate) struct ProvisionOut {
     #[serde(default)]
-    status: Option<String>,
+    pub(crate) status: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
-struct ChatOut {
+pub(crate) struct ChatOut {
     #[serde(default)]
-    response: String,
+    pub(crate) response: String,
 }
 
 /// Cloud calls ride a longer clock than account calls: a first chat includes
 /// a cold VM boot plus a full agent turn, so 30s would cut live requests.
-fn http_client() -> anyhow::Result<reqwest::Client> {
+pub(crate) fn http_client() -> anyhow::Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .user_agent(concat!("gray-account/", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(120))
@@ -425,7 +432,7 @@ fn http_client() -> anyhow::Result<reqwest::Client> {
 /// The stored token, or the enroll flow that mints one. Non-interactive
 /// callers (the `/cloud` slash command) cannot prompt, so they get a clear
 /// error naming the way in.
-async fn require_token(interactive: bool) -> anyhow::Result<String> {
+pub(crate) async fn require_token(interactive: bool) -> anyhow::Result<String> {
     match account::load_token() {
         Some(token) => Ok(token),
         None if interactive => Ok(account::enroll(None, true).await?.0),
@@ -433,7 +440,7 @@ async fn require_token(interactive: bool) -> anyhow::Result<String> {
     }
 }
 
-async fn post<T: for<'de> Deserialize<'de>>(
+pub(crate) async fn post<T: for<'de> Deserialize<'de>>(
     client: &reqwest::Client,
     token: &str,
     path: &str,
@@ -453,11 +460,17 @@ async fn post<T: for<'de> Deserialize<'de>>(
     Ok(resp.json().await?)
 }
 
-async fn provision(client: &reqwest::Client, token: &str) -> anyhow::Result<ProvisionOut> {
+pub(crate) async fn provision(
+    client: &reqwest::Client,
+    token: &str,
+) -> anyhow::Result<ProvisionOut> {
     post(client, token, "agent/provision", &serde_json::json!({})).await
 }
 
-async fn fetch_status(client: &reqwest::Client, token: &str) -> anyhow::Result<StatusOut> {
+pub(crate) async fn fetch_status(
+    client: &reqwest::Client,
+    token: &str,
+) -> anyhow::Result<StatusOut> {
     let url = account::endpoint("agent/status")?;
     let resp = client
         .get(&url)
@@ -471,6 +484,43 @@ async fn fetch_status(client: &reqwest::Client, token: &str) -> anyhow::Result<S
     Ok(resp.json().await?)
 }
 
+/// Where the machine is in its lifecycle, from Maritime's status string —
+/// so the wording can say what is actually happening instead of "first boot"
+/// on every wake.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Phase {
+    Online,
+    /// Snapshot resume, usually ~25s (a full recreate can take 45–95s).
+    Asleep,
+    /// Never booted yet — image pull + setup, a minute or two.
+    FirstBoot,
+    Failed(String),
+    Other(String),
+}
+
+pub(crate) fn phase_of(status: Option<&str>) -> Phase {
+    match status.unwrap_or_default() {
+        "active" | "running" => Phase::Online,
+        "sleeping" | "stopped" | "paused" | "idle" => Phase::Asleep,
+        "" | "deploying" | "creating" | "provisioning" | "pending" => Phase::FirstBoot,
+        s @ ("error" | "failed") => Phase::Failed(s.to_string()),
+        s => Phase::Other(s.to_string()),
+    }
+}
+
+impl Phase {
+    /// The "what's happening now" clause, e.g. for `waking from sleep…`.
+    pub(crate) fn doing(&self) -> String {
+        match self {
+            Phase::Online => "online".into(),
+            Phase::Asleep => "waking from sleep — usually ~25s".into(),
+            Phase::FirstBoot => "first boot — setting up, a minute or two".into(),
+            Phase::Failed(s) => format!("{s} — restarting it"),
+            Phase::Other(s) => format!("{s} — starting it"),
+        }
+    }
+}
+
 async fn status_text(client: &reqwest::Client, token: &str) -> anyhow::Result<String> {
     let prov = provision(client, token).await?;
     let status = fetch_status(client, token).await.unwrap_or(StatusOut {
@@ -478,19 +528,20 @@ async fn status_text(client: &reqwest::Client, token: &str) -> anyhow::Result<St
         ..Default::default()
     });
     if status.suspended {
-        return Ok("your Gray machine is suspended — check your seat at /plans".to_string());
+        return Ok("your machine is suspended — check your seat at /plans".to_string());
     }
-    Ok(match status.status.as_deref() {
-        Some("active") => match status.agent_id.as_deref() {
-            Some(id) => {
-                format!("your Gray machine {id} is up — chat with it: gray cloud <message>")
-            }
-            None => "your Gray machine is up — chat with it: gray cloud <message>".to_string(),
-        },
-        Some(s) => {
-            format!("your Gray machine is {s} — first boot takes a couple of minutes")
+    let id = status
+        .agent_id
+        .as_deref()
+        .map(|id| format!(" ({})", &id[..id.len().min(8)]))
+        .unwrap_or_default();
+    Ok(match phase_of(status.status.as_deref()) {
+        Phase::Online => format!("your machine{id} is online — in gray, /cloud talks to it"),
+        Phase::Asleep => {
+            format!("your machine{id} is asleep — it wakes on the next message (~25s)")
         }
-        None => "your Gray machine is provisioned".to_string(),
+        Phase::FirstBoot => format!("your machine{id} is on its first boot — a minute or two"),
+        Phase::Failed(s) | Phase::Other(s) => format!("your machine{id} is {s}"),
     })
 }
 
@@ -501,30 +552,94 @@ async fn connect(code: Option<&str>, interactive: bool) -> anyhow::Result<String
     Ok(format!("connected as {}\n{status}", acct.label()))
 }
 
-async fn chat(words: &[String], interactive: bool) -> anyhow::Result<String> {
+/// Live "thinking" line on stderr while the model round-trips — pure
+/// perception work: the request itself doesn't change, but a moving counter
+/// makes a 3–10s turn feel attended instead of hung. Clears itself on exit.
+fn thinking_guard(interactive: bool) -> Option<tokio::task::JoinHandle<()>> {
+    use std::io::Write;
+    if !interactive || !std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+        return None;
+    }
+    Some(tokio::spawn(async move {
+        let t0 = std::time::Instant::now();
+        loop {
+            let e = t0.elapsed().as_secs();
+            let _ = write!(std::io::stderr(), "\r\x1b[2K · thinking {e}s");
+            let _ = std::io::stderr().flush();
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }))
+}
+
+fn drop_guard(g: Option<tokio::task::JoinHandle<()>>) {
+    use std::io::Write;
+    if let Some(h) = g {
+        h.abort();
+        let _ = write!(std::io::stderr(), "\r\x1b[2K");
+        let _ = std::io::stderr().flush();
+    }
+}
+
+/// Raw chat POST that keeps the status code, so the caller can provision on
+/// first use instead of paying a round trip on every message.
+pub(crate) async fn post_chat(
+    client: &reqwest::Client,
+    token: &str,
+    message: &str,
+    fresh: bool,
+) -> anyhow::Result<ChatOut> {
+    let url = account::endpoint("agent/chat")?;
+    let send = || {
+        client
+            .post(&url)
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "message": message, "fresh": fresh }))
+            .send()
+    };
+    let mut resp = send()
+        .await
+        .map_err(|e| anyhow::anyhow!("could not reach {url}: {e}"))?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        // No seat row yet — provision, then resend once.
+        provision(client, token).await?;
+        resp = send()
+            .await
+            .map_err(|e| anyhow::anyhow!("could not reach {url}: {e}"))?;
+    }
+    if !resp.status().is_success() {
+        anyhow::bail!(account::error_message(resp).await);
+    }
+    Ok(resp.json().await?)
+}
+
+async fn chat(words: &[String], fresh: bool, interactive: bool) -> anyhow::Result<String> {
     let client = http_client()?;
     let token = require_token(interactive).await?;
     let message = words.join(" ");
     if message.trim().is_empty() {
-        return status_text(&client, &token).await;
+        if !fresh {
+            return status_text(&client, &token).await;
+        }
+        // Bare `new`: rotate the seat's conversation pointer — the next
+        // one-shot, web chat, or gateway message lands in a fresh session.
+        post_chat(&client, &token, "", true).await?;
+        return Ok("new conversation — your next message starts with a clean slate".to_string());
     }
-    provision(&client, &token).await?;
-    let out: ChatOut = post(
-        &client,
-        &token,
-        "agent/chat",
-        &serde_json::json!({ "message": message }),
-    )
-    .await?;
-    Ok(out.response.trim_end().to_string())
+    let guard = thinking_guard(interactive);
+    let out = post_chat(&client, &token, &message, fresh).await;
+    drop_guard(guard);
+    Ok(out?.response.trim_end().to_string())
 }
 
 /// `gray cloud …` entry point: subcommand dispatch plus the chat fallback,
 /// where anything that is not a known verb is the message.
 pub async fn run(args: &[String], interactive: bool) -> anyhow::Result<String> {
-    match args.first().map(String::as_str) {
+    // `/verb` and `verb` are the same thing — slash style is what users type
+    // inside the REPL and it must not fall through to the message path.
+    let verb = args.first().map(|s| s.strip_prefix('/').unwrap_or(s));
+    match verb {
         #[cfg(unix)]
-        None | Some("attach")
+        Some("tty")
             if interactive
                 && std::io::IsTerminal::is_terminal(&std::io::stdout())
                 && std::io::IsTerminal::is_terminal(&std::io::stdin()) =>
@@ -535,7 +650,7 @@ pub async fn run(args: &[String], interactive: bool) -> anyhow::Result<String> {
                 .map_err(|e| anyhow::anyhow!("attach worker: {e}"))??;
             Ok(String::new())
         }
-        None | Some("status") | Some("attach") => {
+        None | Some("status") | Some("attach") | Some("tty") => {
             let client = http_client()?;
             let token = require_token(interactive).await?;
             status_text(&client, &token).await
@@ -543,6 +658,7 @@ pub async fn run(args: &[String], interactive: bool) -> anyhow::Result<String> {
         Some("-h" | "--help" | "help") => Ok(USAGE.to_string()),
         Some("connect") => connect(args.get(1).map(String::as_str), interactive).await,
         Some("logout") => account::logout().await,
-        Some(_) => chat(args, interactive).await,
+        Some("new") => chat(&args[1..], true, interactive).await,
+        Some(_) => chat(args, false, interactive).await,
     }
 }

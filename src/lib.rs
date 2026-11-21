@@ -8,6 +8,9 @@
 
 pub mod account;
 pub mod cloud;
+pub mod cloud_mode;
+pub mod feedback;
+pub mod login_modal;
 pub mod maker;
 pub mod manifest;
 pub mod marketplace;
@@ -16,6 +19,27 @@ pub mod ui;
 
 use serde_json::Value;
 use serde_json::json;
+
+/// One NDJSON frame to stdout. Replies and unsolicited `host/say` requests
+/// come from different tasks; the stdout lock keeps each line whole.
+pub fn emit(frame: &Value) {
+    use std::io::Write as _;
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "{frame}");
+    let _ = out.flush();
+}
+
+/// Print `text` into gray's transcript (`host/say`, capability `host.say`).
+/// gray's reply to the request is ignored by the sidecar loop.
+pub fn host_say(text: &str) {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    emit(&json!({
+        "id": format!("say-{n}"),
+        "method": "host/say",
+        "params": { "text": text },
+    }));
+}
 
 /// What the NDJSON loop should do after [`handle`] runs.
 #[derive(Debug, PartialEq, Eq)]
@@ -37,6 +61,7 @@ pub async fn handle(method: &str, params: &Value, has_id: bool) -> Reply {
     match method {
         "plugin/manifest" => Reply::Result(manifest::manifest()),
         "command/run" => Reply::Result(command_run(params).await),
+        "input/submit" => Reply::Result(cloud_mode::input_submit(params, &cloud_mode::HostSay)),
         "plugin/shutdown" => {
             if has_id {
                 Reply::ResultThenExit(json!({}))
@@ -69,6 +94,9 @@ async fn command_run(params: &Value) -> Value {
                         .filter_map(Value::as_str)
                         .find(|arg| !arg.trim().is_empty())
                 });
+            if code.and_then(account::normalize_code).is_none() {
+                return json!({ "terminal": ["login"], "text": account::login_walkthrough() });
+            }
             render(account::login(code, false).await, "login")
         }
         "/whoami" => render(account::whoami().await, "whoami"),
@@ -82,14 +110,16 @@ async fn command_run(params: &Value) -> Value {
         }
         "/cloud" => {
             let argv = argv_of(params);
-            if matches!(argv.first().map(String::as_str), None | Some("attach")) {
-                return match cloud::run(&argv, false).await {
-                    Ok(text) => json!({ "terminal": ["cloud", "attach"], "text": text }),
-                    Err(e) => json!({ "text": format!("cloud failed: {e:#}") }),
-                };
+            let sid = params
+                .pointer("/session/id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if let Some(reply) = cloud_mode::slash(&argv, sid) {
+                return reply;
             }
             render(cloud::run(&argv, false).await, "cloud")
         }
+        "/feedback" => return feedback::run(&argv_of(params), &params["session"]),
         _ => String::new(),
     };
     json!({ "text": text })
@@ -140,7 +170,8 @@ mod tests {
                 "/logout",
                 "/maker",
                 "/cloud",
-                "/marketplace"
+                "/marketplace",
+                "/feedback"
             ])
         );
         assert_eq!(
