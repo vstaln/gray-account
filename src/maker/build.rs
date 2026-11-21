@@ -171,10 +171,9 @@ fn build_remote(p: &Project, host: &str) -> anyhow::Result<PathBuf> {
 /// (Windows has no gzip; bsdtar lacks the GNU flags).
 fn package(p: &Project, entries: &[(String, PathBuf)]) -> anyhow::Result<PathBuf> {
     let out = p.tarball_path();
-    let gz = flate2::GzBuilder::new().mtime(0).write(
-        std::fs::File::create(&out)?,
-        flate2::Compression::best(),
-    );
+    let gz = flate2::GzBuilder::new()
+        .mtime(0)
+        .write(std::fs::File::create(&out)?, flate2::Compression::best());
     let mut t = tar::Builder::new(gz);
     let mut sorted: Vec<&(String, PathBuf)> = entries.iter().collect();
     sorted.sort_by(|a, b| a.0.cmp(&b.0));
