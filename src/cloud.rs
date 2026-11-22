@@ -656,6 +656,9 @@ pub async fn run(args: &[String], interactive: bool) -> anyhow::Result<String> {
             status_text(&client, &token).await
         }
         Some("-h" | "--help" | "help") => Ok(USAGE.to_string()),
+        Some("-V" | "--version" | "version") => {
+            Ok(format!("gray cloud {}", env!("CARGO_PKG_VERSION")))
+        }
         Some("connect") => connect(args.get(1).map(String::as_str), interactive).await,
         Some("logout") => account::logout().await,
         Some("new") => chat(&args[1..], true, interactive).await,
